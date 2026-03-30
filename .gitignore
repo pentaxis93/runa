@@ -15,3 +15,6 @@ target/
 # Claude Code
 .claude
 .agents
+
+# runa runtime state
+.runa/
