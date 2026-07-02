@@ -1,5 +1,5 @@
-# Rust build artifacts
-/target
+# Rust build artifacts (workspace root and any crate/test scratch dir)
+target/
 
 # Local runa project state (this repo is a Rust project, not a runa-managed one)
 /.runa/
