@@ -313,13 +313,15 @@ impl<T: SourcehutTransport> SourcehutConnector<T> {
         let tracker_rid = self.tracker_rid()?;
         let response = self.graphql(
             "ticket",
-            "query ticket($tracker: ID!, $id: Int!) { tracker(rid: $tracker) { id rid name ticket(id: $id) { id subject body status } } }",
+            "query ticket($tracker: ID!, $id: Int!) { tracker(rid: $tracker) { id rid name ticket(id: $id) { id subject body status events { results { created changes { ... on Comment { text author { canonicalName } } } } } } } }",
             json!({ "id": number, "tracker": tracker_rid }),
         )?;
-        self.ticket_snapshot(
-            number,
-            required_provider_object(&response, "/data/tracker/ticket", "ticket")?,
-        )
+        let ticket = required_provider_object(&response, "/data/tracker/ticket", "ticket")?;
+        let mut snapshot = self.ticket_snapshot(number, ticket)?;
+        if let Some(entries) = comment_entries(ticket) {
+            snapshot["comments"] = Value::Array(entries);
+        }
+        Ok(snapshot)
     }
 
     fn create_ticket(&self, input: Value) -> Result<Value, ForgeError> {
@@ -587,6 +589,48 @@ impl<T: SourcehutTransport> SourcehutConnector<T> {
             "handle '{handle}' is not a SourceHut change handle"
         )))
     }
+}
+
+fn comment_entries(ticket: &Value) -> Option<Vec<Value>> {
+    let results = ticket.get("events")?.get("results")?.as_array()?;
+    let mut entries: Vec<(String, Value)> = Vec::new();
+    for event in results {
+        let created = event
+            .get("created")
+            .and_then(Value::as_str)
+            .filter(|created| !created.is_empty());
+        let Some(changes) = event.get("changes").and_then(Value::as_array) else {
+            continue;
+        };
+        for change in changes {
+            let Some(text) = change
+                .get("text")
+                .and_then(Value::as_str)
+                .filter(|text| !text.is_empty())
+            else {
+                continue;
+            };
+            let author = change
+                .get("author")
+                .and_then(|author| author.get("canonicalName"))
+                .and_then(Value::as_str)
+                .filter(|name| !name.is_empty());
+            let mut entry = serde_json::Map::new();
+            entry.insert("body".into(), Value::String(text.to_string()));
+            if let Some(author) = author {
+                entry.insert("author".into(), Value::String(author.to_string()));
+            }
+            if let Some(created) = created {
+                entry.insert("created_at".into(), Value::String(created.to_string()));
+            }
+            entries.push((
+                created.unwrap_or_default().to_string(),
+                Value::Object(entry),
+            ));
+        }
+    }
+    entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+    Some(entries.into_iter().map(|(_, entry)| entry).collect())
 }
 
 fn required_string<'a>(input: &'a Value, field: &str) -> Result<&'a str, ForgeError> {

@@ -1731,6 +1731,7 @@ dependencies = [
 name = "runa-forge-github"
 version = "0.2.0-rc.1"
 dependencies = [
+ "jsonschema",
  "reqwest",
  "runa-forge-contract",
  "serde",
@@ -1742,6 +1743,7 @@ name = "runa-forge-sourcehut"
 version = "0.2.0-rc.1"
 dependencies = [
  "apollo-compiler",
+ "jsonschema",
  "reqwest",
  "runa-forge-contract",
  "serde",

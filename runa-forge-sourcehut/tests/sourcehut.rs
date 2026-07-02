@@ -1,5 +1,6 @@
 use apollo_compiler::{ExecutableDocument, Schema};
-use runa_forge_contract::{ForgeError, Operation};
+use jsonschema::Validator;
+use runa_forge_contract::{ForgeError, Operation, operation_output_schema};
 use runa_forge_sourcehut::{
     ProviderRequest, SourcehutConfig, SourcehutConnector, SourcehutHttpTransport,
     SourcehutRecordingTransport, SourcehutTransport,
@@ -125,9 +126,16 @@ fn assert_graphql_request_validates(request: &str, expected_field: &str) {
 #[derive(Debug, Clone, Default)]
 struct SourcehutTrackerFakeTransport {
     requests: Arc<Mutex<Vec<ProviderRequest>>>,
+    ticket_events: Arc<Mutex<Option<Value>>>,
 }
 
 impl SourcehutTrackerFakeTransport {
+    fn with_ticket_events(events: Value) -> Self {
+        let transport = Self::default();
+        *transport.ticket_events.lock().unwrap() = Some(events);
+        transport
+    }
+
     fn requests(&self) -> Vec<ProviderRequest> {
         self.requests.lock().unwrap().clone()
     }
@@ -191,18 +199,22 @@ impl SourcehutTransport for SourcehutTrackerFakeTransport {
                         "errors": [{ "message": "tracker(rid:) requires an opaque resource id" }]
                     }));
                 }
+                let mut ticket = json!({
+                    "id": 203,
+                    "subject": "Forge connectors",
+                    "body": "body",
+                    "status": "REPORTED"
+                });
+                if let Some(events) = self.ticket_events.lock().unwrap().clone() {
+                    ticket["events"] = events;
+                }
                 Ok(json!({
                     "data": {
                         "tracker": {
                             "id": 4,
                             "rid": TRACKER_RID,
                             "name": "runa",
-                            "ticket": {
-                                "id": 203,
-                                "subject": "Forge connectors",
-                                "body": "body",
-                                "status": "REPORTED"
-                            }
+                            "ticket": ticket
                         }
                     }
                 }))
@@ -287,6 +299,98 @@ fn sourcehut_fake_rejects_numeric_tracker_id_as_tracker_rid() {
         .unwrap();
 
     assert!(response.get("errors").is_some(), "{response}");
+}
+
+#[test]
+fn read_ticket_returns_the_comment_log_ordered_oldest_first_and_schema_valid() {
+    let transport = SourcehutTrackerFakeTransport::with_ticket_events(json!({
+        "results": [
+            {
+                "created": "2026-07-02T12:00:00Z",
+                "changes": [ { "text": "Review round 2: required correction.", "author": { "canonicalName": "~operator" } } ]
+            },
+            {
+                "created": "2026-07-02T09:00:00Z",
+                "changes": [ {} ]
+            },
+            {
+                "created": "2026-07-02T10:00:00Z",
+                "changes": [ { "text": "Freshen pass — grounded at head.", "author": { "canonicalName": "~governance" } } ]
+            }
+        ]
+    }));
+    let connector = SourcehutConnector::new(config("https://todo.test/query"), transport.clone());
+
+    let output = connector
+        .call(Operation::ReadTicket, json!({ "reference": "203" }))
+        .unwrap();
+
+    assert_eq!(
+        output["comments"],
+        json!([
+            {
+                "body": "Freshen pass — grounded at head.",
+                "author": "~governance",
+                "created_at": "2026-07-02T10:00:00Z"
+            },
+            {
+                "body": "Review round 2: required correction.",
+                "author": "~operator",
+                "created_at": "2026-07-02T12:00:00Z"
+            }
+        ])
+    );
+    let schema = operation_output_schema(Operation::ReadTicket);
+    let validator = Validator::options().build(&schema).unwrap();
+    assert!(
+        validator.is_valid(&output),
+        "snapshot should validate: {output}"
+    );
+}
+
+#[test]
+fn read_ticket_with_zero_comment_events_yields_an_empty_log() {
+    let transport = SourcehutTrackerFakeTransport::with_ticket_events(json!({ "results": [] }));
+    let connector = SourcehutConnector::new(config("https://todo.test/query"), transport.clone());
+
+    let output = connector
+        .call(Operation::ReadTicket, json!({ "reference": "203" }))
+        .unwrap();
+
+    assert_eq!(output["comments"], json!([]));
+    let schema = operation_output_schema(Operation::ReadTicket);
+    let validator = Validator::options().build(&schema).unwrap();
+    assert!(
+        validator.is_valid(&output),
+        "snapshot should validate: {output}"
+    );
+}
+
+#[test]
+fn read_ticket_without_an_events_node_omits_the_log() {
+    let transport = SourcehutTrackerFakeTransport::default();
+    let connector = SourcehutConnector::new(config("https://todo.test/query"), transport.clone());
+
+    let output = connector
+        .call(Operation::ReadTicket, json!({ "reference": "203" }))
+        .unwrap();
+
+    assert!(output.get("comments").is_none());
+}
+
+#[test]
+fn create_ticket_snapshot_carries_no_comment_log() {
+    let transport = SourcehutTrackerFakeTransport::default();
+    let connector = SourcehutConnector::new(config("https://todo.test/query"), transport.clone());
+
+    let output = connector
+        .call(
+            Operation::CreateTicket,
+            json!({ "title": "title", "body": "body" }),
+        )
+        .unwrap();
+
+    assert!(output.get("comments").is_none());
 }
 
 #[test]

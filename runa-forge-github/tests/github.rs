@@ -1,4 +1,5 @@
-use runa_forge_contract::Operation;
+use jsonschema::Validator;
+use runa_forge_contract::{Operation, operation_output_schema};
 use runa_forge_github::{
     GithubConfig, GithubConnector, GithubHttpTransport, GithubRecordingTransport, ProviderRequest,
 };
@@ -85,6 +86,118 @@ fn assert_github_user_agent(request: &str) {
 
 #[test]
 fn read_ticket_accepts_deployment_reference_forms_and_issues_scoped_handles() {
+    for reference in [
+        "github:tesserine/runa#203",
+        "tesserine/runa#203",
+        "#203",
+        "203",
+    ] {
+        let transport = GithubRecordingTransport::default();
+        transport.push_response(json!({
+            "number": 203,
+            "title": "Forge connectors",
+            "body": "body",
+            "state": "open"
+        }));
+        transport.push_response(json!([]));
+        let connector = GithubConnector::new(config("https://api.github.test"), transport.clone());
+
+        let output = connector
+            .call(Operation::ReadTicket, json!({ "reference": reference }))
+            .unwrap();
+
+        assert_eq!(output["handle"]["id"], "github:tesserine/runa:issue:203");
+        assert_eq!(output["title"], "Forge connectors");
+    }
+}
+
+#[test]
+fn read_ticket_returns_the_comment_log_ordered_oldest_first_and_schema_valid() {
+    let transport = GithubRecordingTransport::default();
+    transport.push_response(json!({
+        "number": 203,
+        "title": "Forge connectors",
+        "body": "body",
+        "state": "open"
+    }));
+    transport.push_response(json!([
+        {
+            "body": "Review round 2: required correction.",
+            "user": { "login": "operator" },
+            "created_at": "2026-07-02T12:00:00Z"
+        },
+        {
+            "body": "Freshen pass — grounded at head.",
+            "user": { "login": "governance" },
+            "created_at": "2026-07-02T10:00:00Z"
+        },
+        {
+            "body": "Plan approved.",
+            "user": { "login": "operator" },
+            "created_at": "2026-07-02T11:00:00Z"
+        }
+    ]));
+    let connector = GithubConnector::new(config("https://api.github.test"), transport.clone());
+
+    let output = connector
+        .call(Operation::ReadTicket, json!({ "reference": "203" }))
+        .unwrap();
+
+    assert_eq!(
+        output["comments"],
+        json!([
+            {
+                "body": "Freshen pass — grounded at head.",
+                "author": "governance",
+                "created_at": "2026-07-02T10:00:00Z"
+            },
+            {
+                "body": "Plan approved.",
+                "author": "operator",
+                "created_at": "2026-07-02T11:00:00Z"
+            },
+            {
+                "body": "Review round 2: required correction.",
+                "author": "operator",
+                "created_at": "2026-07-02T12:00:00Z"
+            }
+        ])
+    );
+    let schema = operation_output_schema(Operation::ReadTicket);
+    let validator = Validator::options().build(&schema).unwrap();
+    assert!(
+        validator.is_valid(&output),
+        "snapshot should validate: {output}"
+    );
+}
+
+#[test]
+fn read_ticket_with_zero_provider_comments_yields_an_empty_log() {
+    let transport = GithubRecordingTransport::default();
+    transport.push_response(json!({
+        "number": 203,
+        "title": "Forge connectors",
+        "body": "body",
+        "state": "open"
+    }));
+    transport.push_response(json!([]));
+    let connector = GithubConnector::new(config("https://api.github.test"), transport.clone());
+
+    let output = connector
+        .call(Operation::ReadTicket, json!({ "reference": "203" }))
+        .unwrap();
+
+    assert_eq!(output["comments"], json!([]));
+    let schema = operation_output_schema(Operation::ReadTicket);
+    let validator = Validator::options().build(&schema).unwrap();
+    assert!(
+        validator.is_valid(&output),
+        "snapshot should validate: {output}"
+    );
+}
+
+#[test]
+fn create_ticket_snapshot_carries_no_comment_log() {
     let transport = GithubRecordingTransport::with_repeating_response(json!({
         "number": 203,
         "title": "Forge connectors",
@@ -93,19 +206,14 @@ fn read_ticket_accepts_deployment_reference_forms_and_issues_scoped_handles() {
     }));
     let connector = GithubConnector::new(config("https://api.github.test"), transport.clone());
 
-    for reference in [
-        "github:tesserine/runa#203",
-        "tesserine/runa#203",
-        "#203",
-        "203",
-    ] {
-        let output = connector
-            .call(Operation::ReadTicket, json!({ "reference": reference }))
-            .unwrap();
+    let output = connector
+        .call(
+            Operation::CreateTicket,
+            json!({ "title": "title", "body": "body" }),
+        )
+        .unwrap();
 
-        assert_eq!(output["handle"]["id"], "github:tesserine/runa:issue:203");
-        assert_eq!(output["title"], "Forge connectors");
-    }
+    assert!(output.get("comments").is_none());
 }
 
 #[test]
@@ -145,6 +253,13 @@ fn every_operation_constructs_the_expected_provider_request() {
     }));
     let connector = GithubConnector::new(config("https://api.github.test"), transport.clone());
 
+    transport.push_response(json!({
+        "number": 203,
+        "title": "Forge connectors",
+        "body": "body",
+        "state": "open"
+    }));
+    transport.push_response(json!([]));
     let cases = [
         (Operation::ReadTicket, json!({"reference": "203"})),
         (
@@ -180,6 +295,7 @@ fn every_operation_constructs_the_expected_provider_request() {
 
     let expected_requests = [
         ("GET", "/repos/tesserine/runa/issues/203"),
+        ("GET", "/repos/tesserine/runa/issues/203/comments"),
         ("POST", "/repos/tesserine/runa/issues"),
         ("POST", "/repos/tesserine/runa/issues/203/assignees"),
         ("POST", "/repos/tesserine/runa/issues/203/comments"),
@@ -196,7 +312,7 @@ fn every_operation_constructs_the_expected_provider_request() {
         assert_eq!(request.method, method);
         assert_eq!(request.path, path);
     }
-    assert_eq!(requests[9].body, Some(json!({ "state": "closed" })));
+    assert_eq!(requests[10].body, Some(json!({ "state": "closed" })));
 }
 
 #[test]
@@ -382,20 +498,31 @@ fn production_http_transport_executes_and_parses_read_ticket() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut request = [0_u8; 2048];
-        let size = stream.read(&mut request).unwrap();
-        let request = String::from_utf8_lossy(&request[..size]);
-        assert!(request.starts_with("GET /repos/tesserine/runa/issues/203 "));
-        assert_github_user_agent(&request);
-        let body = r#"{"number":203,"title":"Harness title","body":"Harness body","state":"open"}"#;
-        write!(
-            stream,
-            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
-            body.len(),
-            body
-        )
-        .unwrap();
+        let responses = [
+            (
+                "GET /repos/tesserine/runa/issues/203 ",
+                r#"{"number":203,"title":"Harness title","body":"Harness body","state":"open"}"#,
+            ),
+            (
+                "GET /repos/tesserine/runa/issues/203/comments ",
+                r#"[{"body":"Harness comment","user":{"login":"operator"},"created_at":"2026-07-02T10:00:00Z"}]"#,
+            ),
+        ];
+        for (prefix, body) in responses {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 2048];
+            let size = stream.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..size]);
+            assert!(request.starts_with(prefix), "unexpected request: {request}");
+            assert_github_user_agent(&request);
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        }
     });
 
     let connector = GithubConnector::new(config(&format!("http://{address}")), GithubHttpTransport);
@@ -405,6 +532,14 @@ fn production_http_transport_executes_and_parses_read_ticket() {
 
     assert_eq!(output["title"], "Harness title");
     assert_eq!(output["handle"]["id"], "github:tesserine/runa:issue:203");
+    assert_eq!(
+        output["comments"],
+        json!([{
+            "body": "Harness comment",
+            "author": "operator",
+            "created_at": "2026-07-02T10:00:00Z"
+        }])
+    );
     server.join().unwrap();
 }
 
@@ -418,6 +553,7 @@ fn production_http_transport_executes_and_parses_every_operation() {
             "/repos/tesserine/runa/issues/203",
             r#"{"number":203,"title":"Harness read","body":"Harness body","state":"open"}"#,
         ),
+        ("GET", "/repos/tesserine/runa/issues/203/comments", r#"[]"#),
         (
             "POST",
             "/repos/tesserine/runa/issues",

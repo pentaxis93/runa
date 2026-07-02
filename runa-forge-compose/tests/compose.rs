@@ -99,8 +99,10 @@ fn github_connector_coordinates_follow_resolved_env_identity() {
         ("RUNA_FORGE_OWNER", "override-owner"),
         ("RUNA_FORGE_NAME", "override-repo"),
     ]);
-    let (api_base, request_capture, server) =
-        http_json_server(r#"{"number":203,"title":"Override","body":"body","state":"open"}"#);
+    let (api_base, request_capture, server) = http_json_sequence_server(&[
+        r#"{"number":203,"title":"Override","body":"body","state":"open"}"#,
+        r#"[]"#,
+    ]);
 
     let runtime = runtime_from_config(&ForgeConfig {
         forge_type: Some("github".to_string()),
@@ -120,6 +122,8 @@ fn github_connector_coordinates_follow_resolved_env_identity() {
         request_capture
             .lock()
             .unwrap()
+            .first()
+            .expect("issue request should be captured")
             .starts_with("GET /repos/override-owner/override-repo/issues/203 ")
     );
     assert_eq!(

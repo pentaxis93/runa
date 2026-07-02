@@ -90,6 +90,10 @@ impl GithubRecordingTransport {
         transport
     }
 
+    pub fn push_response(&self, response: Value) {
+        self.responses.lock().unwrap().push_back(response);
+    }
+
     pub fn requests(&self) -> Vec<ProviderRequest> {
         self.requests.lock().unwrap().clone()
     }
@@ -232,7 +236,17 @@ impl<T: GithubTransport> GithubConnector<T> {
             ),
             None,
         )?;
-        self.ticket_snapshot(number, &response)
+        let comments = self.send(
+            "GET",
+            format!(
+                "/repos/{}/{}/issues/{number}/comments",
+                self.config.owner, self.config.repo
+            ),
+            None,
+        )?;
+        let mut snapshot = self.ticket_snapshot(number, &response)?;
+        snapshot["comments"] = Value::Array(comment_entries(&comments)?);
+        Ok(snapshot)
     }
 
     fn create_ticket(&self, input: Value) -> Result<Value, ForgeError> {
@@ -505,6 +519,47 @@ impl<T: GithubTransport> GithubConnector<T> {
             "handle '{handle}' is not a GitHub pull handle"
         )))
     }
+}
+
+fn comment_entries(response: &Value) -> Result<Vec<Value>, ForgeError> {
+    let Some(items) = response.as_array() else {
+        return Err(ForgeError::ProviderResponse(
+            "issue comments response is not an array".into(),
+        ));
+    };
+    let mut entries: Vec<(String, Value)> = Vec::new();
+    for item in items {
+        let Some(body) = item
+            .get("body")
+            .and_then(Value::as_str)
+            .filter(|body| !body.is_empty())
+        else {
+            continue;
+        };
+        let mut entry = serde_json::Map::new();
+        entry.insert("body".into(), Value::String(body.to_string()));
+        if let Some(author) = item
+            .get("user")
+            .and_then(|user| user.get("login"))
+            .and_then(Value::as_str)
+            .filter(|login| !login.is_empty())
+        {
+            entry.insert("author".into(), Value::String(author.to_string()));
+        }
+        let created_at = item
+            .get("created_at")
+            .and_then(Value::as_str)
+            .filter(|created| !created.is_empty());
+        if let Some(created) = created_at {
+            entry.insert("created_at".into(), Value::String(created.to_string()));
+        }
+        entries.push((
+            created_at.unwrap_or_default().to_string(),
+            Value::Object(entry),
+        ));
+    }
+    entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+    Ok(entries.into_iter().map(|(_, entry)| entry).collect())
 }
 
 fn required_string<'a>(input: &'a Value, field: &str) -> Result<&'a str, ForgeError> {
