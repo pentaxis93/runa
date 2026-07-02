@@ -4,8 +4,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
 pub const CAPABILITY_NAME: &str = "forge";
-pub const CAPABILITY_VERSION: &str = "1.1.0";
-pub const COMMONS_PROVENANCE: &str = "commons@6924159fc4ff58745f0e2c68ed16849ffd9b4086";
+pub const CAPABILITY_VERSION: &str = "1.2.0";
+pub const COMMONS_PROVENANCE: &str = "commons@b229fb1a840c27ced31d582b40d766f4f441dcf6";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -227,6 +227,16 @@ fn schema_document((required, properties): (Vec<&str>, BTreeMap<&str, Value>)) -
         "additionalProperties": false,
         "properties": properties,
         "$defs": {
+            "comment-entry": {
+                "type": "object",
+                "required": ["body"],
+                "additionalProperties": false,
+                "properties": {
+                    "body": { "type": "string", "minLength": 1 },
+                    "author": { "type": "string", "minLength": 1 },
+                    "created_at": { "type": "string", "minLength": 1 }
+                }
+            },
             "handle": {
                 "type": "object",
                 "required": ["id", "display"],
@@ -371,6 +381,13 @@ fn operation_output_properties(
             properties.insert("title", string_schema());
             properties.insert("body", serde_json::json!({ "type": ["string", "null"] }));
             properties.insert("state", string_schema());
+            properties.insert(
+                "comments",
+                serde_json::json!({
+                    "type": "array",
+                    "items": { "$ref": "#/$defs/comment-entry" }
+                }),
+            );
             (vec!["handle", "title", "state"], properties)
         }
         Operation::ClaimWorkUnit | Operation::RecordProgress | Operation::CloseOut => {

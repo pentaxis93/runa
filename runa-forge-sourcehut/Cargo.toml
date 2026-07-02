@@ -12,4 +12,5 @@ reqwest.workspace = true
 
 [dev-dependencies]
 apollo-compiler.workspace = true
+jsonschema.workspace = true
 tempfile.workspace = true

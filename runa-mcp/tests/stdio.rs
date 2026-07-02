@@ -453,6 +453,37 @@ where
     (format!("http://{address}"), server)
 }
 
+fn json_sequence_server<F>(
+    bodies: &'static [&'static str],
+    assert_first_request: F,
+) -> (String, thread::JoinHandle<()>)
+where
+    F: FnOnce(&str) + Send + 'static,
+{
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let mut assert_first_request = Some(assert_first_request);
+        for body in bodies {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let size = stream.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..size]);
+            if let Some(assert_request) = assert_first_request.take() {
+                assert_request(&request);
+            }
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        }
+    });
+    (format!("http://{address}"), server)
+}
+
 #[tokio::test]
 async fn call_tool_rejects_forge_artifact_name_collision_before_dispatch() {
     let dir = tempfile::tempdir().unwrap();
@@ -2032,8 +2063,11 @@ async fn mcp_forge_connector_uses_resolved_override_identity() {
 async fn mcp_github_forge_tool_dispatches_production_transport_without_blocking_runtime_panic() {
     let dir = setup_project();
     let project_dir = dir.path().join("project");
-    let (api_base, server) = one_shot_json_server(
-        r#"{"number":203,"title":"MCP GitHub title","body":"MCP body","state":"open"}"#,
+    let (api_base, server) = json_sequence_server(
+        &[
+            r#"{"number":203,"title":"MCP GitHub title","body":"MCP body","state":"open"}"#,
+            r#"[{"body":"MCP comment","user":{"login":"operator"},"created_at":"2026-07-02T10:00:00Z"}]"#,
+        ],
         |request| {
             assert!(
                 request.starts_with("GET /repos/tesserine/runa/issues/203 "),
@@ -2076,6 +2110,14 @@ async fn mcp_github_forge_tool_dispatches_production_transport_without_blocking_
     let payload: serde_json::Value = serde_json::from_str(&tool_result_text(&result)).unwrap();
     assert_eq!(payload["title"], "MCP GitHub title");
     assert_eq!(payload["handle"]["id"], "github:tesserine/runa:issue:203");
+    assert_eq!(
+        payload["comments"],
+        serde_json::json!([{
+            "body": "MCP comment",
+            "author": "operator",
+            "created_at": "2026-07-02T10:00:00Z"
+        }])
+    );
 
     service.cancel().await.unwrap();
     server.join().unwrap();
