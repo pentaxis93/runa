@@ -331,8 +331,8 @@ Without `--dry-run`, requires a Linux host plus an effective agent command. `run
 | 2 | Usage error, currently `--json` without `--dry-run`. |
 | 3 | Quiescent but work remains blocked, waiting, or trapped in a cycle. |
 | 4 | Nothing ready — live `run` did not dispatch any protocol because none were READY. |
-| 5 | Work was attempted, but one or more protocols failed or violated postconditions during the invocation. |
-| 6 | Infrastructure failure: project/config/load/scan/serialization/bootstrap/runtime failure prevented completion from being established. |
+| 5 | Work was attempted, but one or more protocols ran and failed or violated postconditions during the invocation. |
+| 6 | Infrastructure failure: an agent that failed to start (exited without executing any protocol work or delivering any artifact), or a project/config/load/scan/serialization/bootstrap/runtime failure, prevented completion from being established. |
 | 130 | Interrupted — `Ctrl-C` prevented the next candidate from starting. |
 
 ### `runa go`

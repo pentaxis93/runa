@@ -26,6 +26,13 @@ pub enum RunOutcome {
     NothingReady,
     QuiescentFailures,
     QuiescentBlocked,
+    /// The run recorded failures but attempted no protocol work: every failure
+    /// was an agent that could not start (no `Succeeded`, no
+    /// `PostconditionFailure`). The execution substrate failed before any
+    /// completion could be established, so this is an infrastructure failure —
+    /// distinct from `QuiescentFailures`, which is work that ran and failed its
+    /// completion checks. See commons/EXIT-CODES.md and tesserine/runa#232.
+    AgentStartupFailure,
     Interrupted,
 }
 
@@ -43,6 +50,7 @@ impl RunOutcome {
             RunOutcome::NothingReady => ExitCode::NothingReady,
             RunOutcome::QuiescentFailures => ExitCode::WorkFailed,
             RunOutcome::QuiescentBlocked => ExitCode::Blocked,
+            RunOutcome::AgentStartupFailure => ExitCode::InfrastructureFailure,
             RunOutcome::Interrupted => ExitCode::Success,
         }
     }
@@ -53,6 +61,7 @@ impl RunOutcome {
             RunOutcome::NothingReady => "nothing_ready",
             RunOutcome::QuiescentFailures => "work_failed",
             RunOutcome::QuiescentBlocked => "blocked",
+            RunOutcome::AgentStartupFailure => "infrastructure_failure",
             RunOutcome::Interrupted => "interrupted",
         }
     }
@@ -248,7 +257,19 @@ fn classify_live_outcome(
     evaluated: &protocol_eval::EvaluatedProtocols,
     had_failures: bool,
     executed_any: bool,
+    had_postcondition_failure: bool,
 ) -> RunOutcome {
+    // Work was attempted iff a protocol executed to reconciliation (`Succeeded`)
+    // or ran and failed its postconditions (`PostconditionFailure`). A run that
+    // recorded failures but attempted no work — every failure an agent that
+    // could not start — is an infrastructure failure, not a work failure:
+    // `work_failed` (5) is reserved for work that ran and failed its completion
+    // checks. See commons/EXIT-CODES.md and tesserine/runa#232.
+    let work_attempted = executed_any || had_postcondition_failure;
+    if had_failures && !work_attempted {
+        return RunOutcome::AgentStartupFailure;
+    }
+
     match classify_outcome(evaluated, had_failures) {
         RunOutcome::AllComplete if !executed_any => RunOutcome::NothingReady,
         outcome => outcome,
@@ -685,7 +706,7 @@ fn run_with_scope(
     )?;
     let mut state = initial_state;
     if state.planned_entries.is_empty() {
-        let outcome = classify_live_outcome(&state.evaluated, false, prior_execution);
+        let outcome = classify_live_outcome(&state.evaluated, false, prior_execution, false);
         println!("Run outcome: {}", outcome.label());
         return Ok(outcome);
     }
@@ -699,6 +720,7 @@ fn run_with_scope(
     let mut exhausted = HashSet::new();
     let mut failed = HashSet::new();
     let mut executed_any = prior_execution;
+    let mut had_postcondition_failure = false;
 
     loop {
         let next_entry = state.planned_entries.clone().into_iter().find(|entry| {
@@ -706,7 +728,12 @@ fn run_with_scope(
             !exhausted.contains(&key) && !failed.contains(&key)
         });
         let Some(next_entry) = next_entry else {
-            let outcome = classify_live_outcome(&state.evaluated, !failed.is_empty(), executed_any);
+            let outcome = classify_live_outcome(
+                &state.evaluated,
+                !failed.is_empty(),
+                executed_any,
+                had_postcondition_failure,
+            );
             println!("Run outcome: {}", outcome.label());
             return Ok(outcome);
         };
@@ -754,6 +781,7 @@ fn run_with_scope(
             }
             Ok(ReconcileOutcome::PostconditionFailure { scan_result }) => {
                 failed.insert(key);
+                had_postcondition_failure = true;
                 state = refresh_state_after_scan(
                     &loaded,
                     working_dir,
@@ -1092,6 +1120,60 @@ mod tests {
         assert_eq!(
             classify_outcome(&evaluated, false),
             RunOutcome::QuiescentBlocked
+        );
+    }
+
+    fn evaluated_all_complete() -> EvaluatedProtocols {
+        EvaluatedProtocols {
+            topology: libagent::EvaluationTopology {
+                status_order: Vec::new(),
+                execution_order: Vec::new(),
+                cycle: None,
+            },
+            cycle: None,
+            ready: Vec::new(),
+            blocked: Vec::new(),
+            waiting: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn classify_live_outcome_reports_agent_startup_failure_when_no_work_attempted() {
+        // Failures occurred, but every one was an agent that could not start:
+        // nothing executed, no postcondition ever ran. This is infrastructure
+        // failure (6), not work_failed (5).
+        let evaluated = evaluated_all_complete();
+        assert_eq!(
+            classify_live_outcome(&evaluated, true, false, false),
+            RunOutcome::AgentStartupFailure
+        );
+        assert_eq!(
+            RunOutcome::AgentStartupFailure.as_exit_code(),
+            ExitCode::InfrastructureFailure
+        );
+    }
+
+    #[test]
+    fn classify_live_outcome_reports_work_failed_when_postconditions_failed_without_execution() {
+        // The agent ran and produced output, but its postconditions failed. Work
+        // was attempted, so this stays work_failed (5) even though nothing
+        // reconciled to `Succeeded`.
+        let evaluated = evaluated_all_complete();
+        assert_eq!(
+            classify_live_outcome(&evaluated, true, false, true),
+            RunOutcome::QuiescentFailures
+        );
+    }
+
+    #[test]
+    fn classify_live_outcome_reports_work_failed_when_work_executed_then_a_step_failed() {
+        // At least one protocol executed successfully before a later failure.
+        // Meaningful work was established, so this is work_failed (5), not an
+        // infrastructure failure.
+        let evaluated = evaluated_all_complete();
+        assert_eq!(
+            classify_live_outcome(&evaluated, true, true, false),
+            RunOutcome::QuiescentFailures
         );
     }
 

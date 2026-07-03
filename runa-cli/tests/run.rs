@@ -483,6 +483,20 @@ fn write_single_protocol_agent(dir: &Path) -> PathBuf {
     fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755)).unwrap();
     script_path
 }
+/// An agent that always fails to start: it consumes the payload, logs its
+/// invocation, emits a startup-style message, and exits non-zero without
+/// executing any protocol work or writing any workspace artifact — the shape of
+/// an agent that cannot authenticate (e.g. "Not logged in").
+fn write_always_failing_agent(dir: &Path) -> PathBuf {
+    let script_path = dir.join("always-failing-agent.sh");
+    fs::write(
+        &script_path,
+        "#!/bin/sh\nlog_file=\"$1\"\npayload=$(cat)\nprintf 'startup-failure\\n' >> \"$log_file\"\nprintf 'Not logged in\\n'\nexit 1\n",
+    )
+    .unwrap();
+    fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755)).unwrap();
+    script_path
+}
 fn write_arg_logging_single_protocol_agent(dir: &Path) -> PathBuf {
     let script_path = dir.join("arg-logging-single-protocol-agent.sh");
     fs::write(
@@ -670,6 +684,77 @@ trigger = { type = "on_artifact", name = "constraints" }
     let executed = fs::read_to_string(&log_path).unwrap();
     assert_eq!(executed, "implement\n");
     assert!(workspace.join("implementation/impl-1.json").is_file());
+}
+#[test]
+fn run_without_dry_run_reports_agent_startup_failure_as_infrastructure_failure() {
+    // AC1 (tesserine/runa#232): a session whose agent exits non-zero having
+    // executed no protocol work and delivered no artifact is infrastructure_failure
+    // (6), not work_failed (5).
+    let dir = tempfile::tempdir().unwrap();
+    let bool_schema =
+        r#"{"type":"object","required":["done"],"properties":{"done":{"type":"boolean"}}}"#;
+    let manifest_path = common::write_methodology(
+        dir.path(),
+        r#"
+name = "groundwork"
+
+[[artifact_types]]
+name = "constraints"
+
+[[artifact_types]]
+name = "implementation"
+
+[[protocols]]
+name = "implement"
+requires = ["constraints"]
+produces = ["implementation"]
+trigger = { type = "on_artifact", name = "constraints" }
+"#,
+        &[
+            (
+                "constraints",
+                r#"{"type":"object","required":["title"],"properties":{"title":{"type":"string"}}}"#,
+            ),
+            ("implementation", bool_schema),
+        ],
+        &["implement"],
+    );
+
+    let project_dir = dir.path().join("project");
+    fs::create_dir(&project_dir).unwrap();
+    init_project(&project_dir, &manifest_path);
+
+    let workspace = project_dir.join(".runa/workspace");
+    fs::create_dir_all(workspace.join("constraints")).unwrap();
+    fs::write(
+        workspace.join("constraints/spec-1.json"),
+        r#"{"title":"ship run"}"#,
+    )
+    .unwrap();
+
+    let log_path = dir.path().join("startup-failure.log");
+    let agent_path = write_always_failing_agent(dir.path());
+    append_agent_command_config(&project_dir, &[agent_path.as_path(), log_path.as_path()]);
+
+    let output = runa_bin()
+        .arg("run")
+        .current_dir(&project_dir)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(6), "{output:?}");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Run outcome: infrastructure_failure"),
+        "stdout: {stdout}"
+    );
+
+    // The agent was actually dispatched and failed — this is a failure to start,
+    // not a "nothing ready" outcome — yet it produced no workspace artifact.
+    let executed = fs::read_to_string(&log_path).unwrap();
+    assert_eq!(executed, "startup-failure\n");
+    assert!(!workspace.join("implementation").exists());
 }
 #[test]
 fn run_without_dry_run_cli_agent_command_overrides_configured_agent_command() {
