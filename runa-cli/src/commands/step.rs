@@ -204,9 +204,14 @@ impl StepError {
     pub(crate) fn exit_code(&self) -> ExitCode {
         match self {
             StepError::JsonRequiresDryRun => ExitCode::UsageError,
-            StepError::AgentCommandFailed { .. } | StepError::PostExecutionEnforcement { .. } => {
-                ExitCode::WorkFailed
-            }
+            // The agent process exited non-zero before postconditions were ever
+            // assessed: no work completion was established, so this is an
+            // infrastructure failure, not a work failure. `work_failed` (5) is
+            // reserved for work that ran and failed its completion checks — the
+            // `PostExecutionEnforcement` path below, reached only after a clean
+            // agent exit. See commons/EXIT-CODES.md and tesserine/runa#232.
+            StepError::AgentCommandFailed { .. } => ExitCode::InfrastructureFailure,
+            StepError::PostExecutionEnforcement { .. } => ExitCode::WorkFailed,
             StepError::SessionDidNotAdvance { .. } => ExitCode::WorkFailed,
             StepError::TicketReference(err) => match err {
                 libagent::EntryError::InvalidReference { .. }
@@ -2013,5 +2018,49 @@ cat >/dev/null
         let decision = decide_live_fallback_after_refresh(refreshed);
 
         assert_eq!(decision, Err(StepOutcome::NothingReady));
+    }
+
+    #[test]
+    fn agent_startup_failure_maps_to_infrastructure_failure() {
+        // The agent process exited non-zero having reached no postcondition
+        // enforcement: no work completion was established, so this is an
+        // infrastructure failure, not a work failure (tesserine/runa#233).
+        let err = StepError::AgentCommandFailed {
+            command: "agent".to_string(),
+            protocol: "protocol".to_string(),
+            work_unit: None,
+            status: "exit status: 1".to_string(),
+        };
+
+        assert_eq!(err.exit_code(), ExitCode::InfrastructureFailure);
+    }
+
+    #[test]
+    fn postcondition_enforcement_failure_stays_work_failed() {
+        // The agent ran and exited cleanly; its postconditions failed. Work was
+        // attempted and failed its completion checks — `work_failed` (5).
+        let err = StepError::PostExecutionEnforcement {
+            protocol: "protocol".to_string(),
+            work_unit: None,
+            source: libagent::EnforcementError {
+                protocol_name: "protocol".to_string(),
+                phase: libagent::Phase::Post,
+                failures: Vec::new(),
+            },
+        };
+
+        assert_eq!(err.exit_code(), ExitCode::WorkFailed);
+    }
+
+    #[test]
+    fn session_did_not_advance_stays_work_failed() {
+        // The agent exited successfully but did not advance the session step:
+        // work was attempted and did not complete — `work_failed` (5), unchanged.
+        let err = StepError::SessionDidNotAdvance {
+            protocol: "protocol".to_string(),
+            work_unit: None,
+        };
+
+        assert_eq!(err.exit_code(), ExitCode::WorkFailed);
     }
 }

@@ -274,8 +274,8 @@ Without `--dry-run`, `step` requires `[agent].command` in the config and a Linux
 | 2 | Usage error, currently `--json` without `--dry-run`. |
 | 3 | No READY candidate and work remains blocked, waiting on prerequisites, or trapped in a cycle. |
 | 4 | No READY candidate and no actionable work remains because the in-scope outputs are already current. |
-| 5 | Work was attempted, but the agent failed or postconditions were not satisfied. |
-| 6 | Infrastructure failure: project/config/load/scan/serialization/bootstrap/MCP lookup/runtime I/O failure prevented completion from being established. |
+| 5 | Work was attempted, but its postconditions or completion checks were not satisfied. |
+| 6 | Infrastructure failure: an agent that failed to start (exited without executing any protocol work or delivering any artifact), or a project/config/load/scan/serialization/bootstrap/MCP lookup/runtime I/O failure, prevented completion from being established. |
 
 ### `runa run`
 
@@ -385,8 +385,8 @@ fails with exit `5`.
 | 2 | Usage error, or a ticket reference that is unparseable or disagrees with the active deployment. |
 | 3 | No READY candidate and work remains blocked, waiting on prerequisites, or trapped in a cycle. |
 | 4 | No READY candidate and no actionable work remains because the in-scope outputs are already current. |
-| 5 | Work was attempted, but the agent failed or did not advance the selected session step. |
-| 6 | Infrastructure failure: project/config/load/scan/serialization/bootstrap/MCP lookup/runtime I/O failure prevented completion from being established. |
+| 5 | Work was attempted, but the agent did not advance the selected session step. |
+| 6 | Infrastructure failure: an agent that failed to start (exited without executing any protocol work or delivering any artifact), or a project/config/load/scan/serialization/bootstrap/MCP lookup/runtime I/O failure, prevented completion from being established. |
 
 ## MCP Server
 
