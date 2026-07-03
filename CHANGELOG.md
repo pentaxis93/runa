@@ -65,6 +65,15 @@ Semantic Versioning.
 
 ### Fixed
 
+- `run` now reports a session whose agent **fails to start** — the agent
+  process exits without executing any protocol work or delivering any artifact
+  — as `infrastructure_failure` (6) rather than `work_failed` (5). The outcome
+  classification distinguishes the two from observable run state: a run that
+  recorded failures but attempted no work (no protocol reached `Succeeded` and
+  none ran to a postcondition check) is an infrastructure failure, while
+  `work_failed` remains reserved for work that ran and failed its completion
+  checks. Honest-Signal fix for the commons/EXIT-CODES.md contract, surfaced by
+  a session whose agent never authenticated (tesserine/runa#232).
 - Invariant-bearing modules now document their invariants at the code:
   `session.rs` opens with the session state-machine contract (state derives
   from artifacts, single current step, transactional `advance`,
