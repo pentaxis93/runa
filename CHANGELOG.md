@@ -74,6 +74,15 @@ Semantic Versioning.
   `work_failed` remains reserved for work that ran and failed its completion
   checks. Honest-Signal fix for the commons/EXIT-CODES.md contract, surfaced by
   a session whose agent never authenticated (tesserine/runa#232).
+- `step` and `go` now report an agent that **fails to start** — the agent
+  process exits without executing any protocol work or delivering any artifact
+  — as `infrastructure_failure` (6) rather than `work_failed` (5), on their own
+  command surfaces. The `StepError::exit_code` mapping distinguishes the agent
+  process failing (`AgentCommandFailed`, reached before any postcondition
+  assessment) from work that ran and failed its completion checks
+  (`PostExecutionEnforcement` / a session that did not advance), which remain
+  `work_failed` (5). The sibling of the `run` fix above on the `step`/`go`
+  surfaces (tesserine/runa#233).
 - Invariant-bearing modules now document their invariants at the code:
   `session.rs` opens with the session state-machine contract (state derives
   from artifacts, single current step, transactional `advance`,
