@@ -212,8 +212,8 @@ impl<T: GithubTransport> ForgeConnector for GithubConnector<T> {
 
     fn call(&self, operation: Operation, input: Value) -> Result<Value, ForgeError> {
         match operation {
-            Operation::ReadTicket => self.read_ticket(input),
-            Operation::CreateTicket => self.create_ticket(input),
+            Operation::ReadWorkUnit => self.read_work_unit(input),
+            Operation::CreateWorkUnit => self.create_work_unit(input),
             Operation::ClaimWorkUnit => self.claim_work_unit(input),
             Operation::RecordProgress => self.record_progress(input),
             Operation::DeliverChangeProposal => self.deliver_change_proposal(input),
@@ -225,7 +225,7 @@ impl<T: GithubTransport> ForgeConnector for GithubConnector<T> {
 }
 
 impl<T: GithubTransport> GithubConnector<T> {
-    fn read_ticket(&self, input: Value) -> Result<Value, ForgeError> {
+    fn read_work_unit(&self, input: Value) -> Result<Value, ForgeError> {
         let reference = required_string(&input, "reference")?;
         let number = self.resolve_reference(reference)?;
         let response = self.send(
@@ -244,12 +244,12 @@ impl<T: GithubTransport> GithubConnector<T> {
             ),
             None,
         )?;
-        let mut snapshot = self.ticket_snapshot(number, &response)?;
+        let mut snapshot = self.work_unit_snapshot(number, &response)?;
         snapshot["comments"] = Value::Array(comment_entries(&comments)?);
         Ok(snapshot)
     }
 
-    fn create_ticket(&self, input: Value) -> Result<Value, ForgeError> {
+    fn create_work_unit(&self, input: Value) -> Result<Value, ForgeError> {
         let title = required_string(&input, "title")?;
         let body = required_string(&input, "body")?;
         let response = self.send(
@@ -258,7 +258,7 @@ impl<T: GithubTransport> GithubConnector<T> {
             Some(json!({ "title": title, "body": body })),
         )?;
         let number = response.get("number").and_then(Value::as_u64).unwrap_or(0);
-        self.ticket_snapshot(number, &response)
+        self.work_unit_snapshot(number, &response)
     }
 
     fn claim_work_unit(&self, input: Value) -> Result<Value, ForgeError> {
@@ -424,7 +424,7 @@ impl<T: GithubTransport> GithubConnector<T> {
         Ok(json!({ "handle": self.issue_handle(number), "receipt": receipt(response, "closed") }))
     }
 
-    fn ticket_snapshot(&self, number: u64, response: &Value) -> Result<Value, ForgeError> {
+    fn work_unit_snapshot(&self, number: u64, response: &Value) -> Result<Value, ForgeError> {
         let number = if number == 0 {
             response
                 .get("number")
@@ -592,7 +592,7 @@ fn parse_number(value: &str) -> Result<u64, ForgeError> {
         .parse::<u64>()
         .ok()
         .filter(|number| *number > 0)
-        .ok_or_else(|| ForgeError::InvalidInput(format!("invalid ticket number '{value}'")))
+        .ok_or_else(|| ForgeError::InvalidInput(format!("invalid issue number '{value}'")))
 }
 
 fn response_string<'a>(response: &'a Value, pointers: &[&str]) -> Result<&'a str, ForgeError> {

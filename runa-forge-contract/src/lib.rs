@@ -4,14 +4,14 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
 pub const CAPABILITY_NAME: &str = "forge";
-pub const CAPABILITY_VERSION: &str = "1.2.0";
-pub const COMMONS_PROVENANCE: &str = "commons@b229fb1a840c27ced31d582b40d766f4f441dcf6";
+pub const CAPABILITY_VERSION: &str = "2.0.0";
+pub const COMMONS_PROVENANCE: &str = "https://raw.githubusercontent.com/tesserine/commons/e75e211689e92a4772614bfe6e4eca4b647d4d66/schemas/forge-capability/v2/forge-capability.schema.json";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Operation {
-    ReadTicket,
-    CreateTicket,
+    ReadWorkUnit,
+    CreateWorkUnit,
     ClaimWorkUnit,
     RecordProgress,
     DeliverChangeProposal,
@@ -22,8 +22,8 @@ pub enum Operation {
 
 impl Operation {
     pub const ALL: [Operation; 8] = [
-        Operation::ReadTicket,
-        Operation::CreateTicket,
+        Operation::ReadWorkUnit,
+        Operation::CreateWorkUnit,
         Operation::ClaimWorkUnit,
         Operation::RecordProgress,
         Operation::DeliverChangeProposal,
@@ -34,8 +34,8 @@ impl Operation {
 
     pub const fn canonical_name(self) -> &'static str {
         match self {
-            Operation::ReadTicket => "read-ticket",
-            Operation::CreateTicket => "create-ticket",
+            Operation::ReadWorkUnit => "read-work-unit",
+            Operation::CreateWorkUnit => "create-work-unit",
             Operation::ClaimWorkUnit => "claim-work-unit",
             Operation::RecordProgress => "record-progress",
             Operation::DeliverChangeProposal => "deliver-change-proposal",
@@ -290,11 +290,11 @@ fn operation_input_properties(
 ) -> (Vec<&'static str>, BTreeMap<&'static str, Value>) {
     let mut properties = BTreeMap::new();
     match operation {
-        Operation::ReadTicket => {
+        Operation::ReadWorkUnit => {
             properties.insert("reference", string_schema());
             (vec!["reference"], properties)
         }
-        Operation::CreateTicket => {
+        Operation::CreateWorkUnit => {
             properties.insert("title", string_schema());
             properties.insert("body", string_schema());
             (vec!["title", "body"], properties)
@@ -376,7 +376,7 @@ fn operation_output_properties(
 ) -> (Vec<&'static str>, BTreeMap<&'static str, Value>) {
     let mut properties = BTreeMap::new();
     match operation {
-        Operation::ReadTicket | Operation::CreateTicket => {
+        Operation::ReadWorkUnit | Operation::CreateWorkUnit => {
             properties.insert("handle", handle_ref());
             properties.insert("title", string_schema());
             properties.insert("body", serde_json::json!({ "type": ["string", "null"] }));

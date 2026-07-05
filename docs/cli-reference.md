@@ -34,7 +34,7 @@ credential_env = "WEFORGE_OPERATOR_PAT"
 credential_command = ["bws", "secret", "get", "..."]
 
 [forge.tool_aliases]
-"github:read-ticket" = "github-read-ticket"
+"github:read-work-unit" = "github-read-work-unit"
 ```
 
 `[transcript].dir` enables transcript capture and is resolved relative to the
@@ -54,7 +54,7 @@ when neither config nor env specifies one.
 
 When `[forge]` is sufficiently configured for a supported connector, `runa-mcp`
 also exposes the forge capability tool-set alongside artifact and session
-driver tools. The canonical operations are `read-ticket`, `create-ticket`,
+driver tools. The canonical operations are `read-work-unit`, `create-work-unit`,
 `claim-work-unit`, `record-progress`, `deliver-change-proposal`,
 `reflect-disposition`, `apply-approved-change`, and `close-out`. GitHub uses
 `owner` and `name`; SourceHut uses `tracker_id` for ticket identity and uses
@@ -68,7 +68,7 @@ the connector should obtain credentials; secret values are process-local inputs
 and are not serialized into MCP tool schemas, launch config, transcripts, or
 logs.
 `[forge.tool_aliases]` maps role-qualified connector tool names such as
-`"github:read-ticket"` to explicit exposed MCP names; otherwise name collisions
+`"github:read-work-unit"` to explicit exposed MCP names; otherwise name collisions
 across composed tool sets fail loudly.
 
 ### Logging

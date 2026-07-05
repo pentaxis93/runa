@@ -70,18 +70,18 @@ fn forge_collision_manifest_toml() -> &'static str {
 name = "groundwork"
 
 [[artifact_types]]
-name = "read-ticket"
+name = "read-work-unit"
 
 [[protocols]]
 name = "take"
-produces = ["read-ticket"]
-trigger = { type = "on_change", name = "read-ticket" }
+produces = ["read-work-unit"]
+trigger = { type = "on_change", name = "read-work-unit" }
 "#
 }
 
 fn forge_collision_schemas() -> Vec<(&'static str, &'static str)> {
     vec![(
-        "read-ticket",
+        "read-work-unit",
         r#"{"type":"object","required":["title"],"properties":{"title":{"type":"string"}}}"#,
     )]
 }
@@ -419,9 +419,9 @@ fn canonical_forge_tool_names() -> Vec<&'static str> {
         "apply-approved-change",
         "claim-work-unit",
         "close-out",
-        "create-ticket",
+        "create-work-unit",
         "deliver-change-proposal",
-        "read-ticket",
+        "read-work-unit",
         "record-progress",
         "reflect-disposition",
     ]
@@ -518,7 +518,7 @@ async fn call_tool_rejects_forge_artifact_name_collision_before_dispatch() {
 
     let result = service
         .call_tool(tool_call(
-            "read-ticket",
+            "read-work-unit",
             serde_json::json!({
                 "instance_id": "artifact-1",
                 "title": "must not dispatch to forge"
@@ -528,12 +528,12 @@ async fn call_tool_rejects_forge_artifact_name_collision_before_dispatch() {
         .unwrap();
     let text = tool_result_text(&result);
     assert!(
-        text.contains("tool name collision") && text.contains("read-ticket"),
+        text.contains("tool name collision") && text.contains("read-work-unit"),
         "colliding tool name should be rejected before forge dispatch: {text}"
     );
     assert!(
         !project_dir
-            .join(".runa/workspace/read-ticket/artifact-1.json")
+            .join(".runa/workspace/read-work-unit/artifact-1.json")
             .exists(),
         "colliding call must not write an artifact"
     );
@@ -1978,12 +1978,12 @@ async fn mcp_accepts_tracker_backed_work_unit_with_forge_identity_only_in_config
     expected_names.sort_unstable();
     assert_eq!(tool_names, expected_names);
 
-    let read_ticket = tools
+    let read_work_unit = tools
         .iter()
-        .find(|tool| tool.name.as_ref() == "read-ticket")
-        .expect("read-ticket connector tool should be advertised");
+        .find(|tool| tool.name.as_ref() == "read-work-unit")
+        .expect("read-work-unit connector tool should be advertised");
     assert!(
-        read_ticket.output_schema.is_some(),
+        read_work_unit.output_schema.is_some(),
         "forge connector tools should advertise output schemas"
     );
 
@@ -2039,13 +2039,15 @@ async fn mcp_forge_connector_uses_resolved_override_identity() {
 
     let tools = service.list_all_tools().await.unwrap();
     assert!(
-        tools.iter().any(|tool| tool.name.as_ref() == "read-ticket"),
+        tools
+            .iter()
+            .any(|tool| tool.name.as_ref() == "read-work-unit"),
         "forge connector tools should be advertised"
     );
 
     let result = service
         .call_tool(tool_call(
-            "read-ticket",
+            "read-work-unit",
             serde_json::json!({ "reference": "stale-owner/stale-repo#203" }),
         ))
         .await
@@ -2100,7 +2102,7 @@ async fn mcp_github_forge_tool_dispatches_production_transport_without_blocking_
     let result = tokio::time::timeout(
         Duration::from_secs(5),
         service.call_tool(tool_call(
-            "read-ticket",
+            "read-work-unit",
             serde_json::json!({ "reference": "203" }),
         )),
     )
@@ -2201,7 +2203,7 @@ async fn mcp_sourcehut_forge_tool_dispatches_production_transport_without_blocki
     let result = tokio::time::timeout(
         Duration::from_secs(5),
         service.call_tool(tool_call(
-            "read-ticket",
+            "read-work-unit",
             serde_json::json!({ "reference": "203" }),
         )),
     )
@@ -2485,7 +2487,7 @@ async fn forge_tool_calls_append_transcript_events_when_enabled() {
 
     service
         .call_tool(tool_call(
-            "read-ticket",
+            "read-work-unit",
             serde_json::json!({ "reference": "tesserine/groundwork#203" }),
         ))
         .await
@@ -2497,11 +2499,11 @@ async fn forge_tool_calls_append_transcript_events_when_enabled() {
         String::new()
     };
     assert!(
-        events.contains(r#""kind":"tool_call","protocol":"implement","work_unit":"wu-1","tool_name":"read-ticket""#),
+        events.contains(r#""kind":"tool_call","protocol":"implement","work_unit":"wu-1","tool_name":"read-work-unit""#),
         "missing forge tool_call transcript event: {events}"
     );
     assert!(
-        events.contains(r#""kind":"tool_result","protocol":"implement","work_unit":"wu-1","tool_name":"read-ticket""#),
+        events.contains(r#""kind":"tool_result","protocol":"implement","work_unit":"wu-1","tool_name":"read-work-unit""#),
         "missing forge tool_result transcript event: {events}"
     );
 

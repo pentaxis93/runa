@@ -35,8 +35,8 @@ fn change() -> serde_json::Value {
 
 fn input_for_operation(operation: Operation) -> Value {
     match operation {
-        Operation::ReadTicket => json!({"reference": "203"}),
-        Operation::CreateTicket => json!({"title": "title", "body": "body"}),
+        Operation::ReadWorkUnit => json!({"reference": "203"}),
+        Operation::CreateWorkUnit => json!({"title": "title", "body": "body"}),
         Operation::ClaimWorkUnit => json!({"handle": handle(203)}),
         Operation::RecordProgress => json!({"handle": handle(203), "body": "progress"}),
         Operation::DeliverChangeProposal => {
@@ -85,7 +85,7 @@ fn assert_github_user_agent(request: &str) {
 }
 
 #[test]
-fn read_ticket_accepts_deployment_reference_forms_and_issues_scoped_handles() {
+fn read_work_unit_accepts_deployment_reference_forms_and_issues_scoped_handles() {
     for reference in [
         "github:tesserine/runa#203",
         "tesserine/runa#203",
@@ -103,7 +103,7 @@ fn read_ticket_accepts_deployment_reference_forms_and_issues_scoped_handles() {
         let connector = GithubConnector::new(config("https://api.github.test"), transport.clone());
 
         let output = connector
-            .call(Operation::ReadTicket, json!({ "reference": reference }))
+            .call(Operation::ReadWorkUnit, json!({ "reference": reference }))
             .unwrap();
 
         assert_eq!(output["handle"]["id"], "github:tesserine/runa:issue:203");
@@ -112,7 +112,7 @@ fn read_ticket_accepts_deployment_reference_forms_and_issues_scoped_handles() {
 }
 
 #[test]
-fn read_ticket_returns_the_comment_log_ordered_oldest_first_and_schema_valid() {
+fn read_work_unit_returns_the_comment_log_ordered_oldest_first_and_schema_valid() {
     let transport = GithubRecordingTransport::default();
     transport.push_response(json!({
         "number": 203,
@@ -140,7 +140,7 @@ fn read_ticket_returns_the_comment_log_ordered_oldest_first_and_schema_valid() {
     let connector = GithubConnector::new(config("https://api.github.test"), transport.clone());
 
     let output = connector
-        .call(Operation::ReadTicket, json!({ "reference": "203" }))
+        .call(Operation::ReadWorkUnit, json!({ "reference": "203" }))
         .unwrap();
 
     assert_eq!(
@@ -163,7 +163,7 @@ fn read_ticket_returns_the_comment_log_ordered_oldest_first_and_schema_valid() {
             }
         ])
     );
-    let schema = operation_output_schema(Operation::ReadTicket);
+    let schema = operation_output_schema(Operation::ReadWorkUnit);
     let validator = Validator::options().build(&schema).unwrap();
     assert!(
         validator.is_valid(&output),
@@ -172,7 +172,7 @@ fn read_ticket_returns_the_comment_log_ordered_oldest_first_and_schema_valid() {
 }
 
 #[test]
-fn read_ticket_with_zero_provider_comments_yields_an_empty_log() {
+fn read_work_unit_with_zero_provider_comments_yields_an_empty_log() {
     let transport = GithubRecordingTransport::default();
     transport.push_response(json!({
         "number": 203,
@@ -184,11 +184,11 @@ fn read_ticket_with_zero_provider_comments_yields_an_empty_log() {
     let connector = GithubConnector::new(config("https://api.github.test"), transport.clone());
 
     let output = connector
-        .call(Operation::ReadTicket, json!({ "reference": "203" }))
+        .call(Operation::ReadWorkUnit, json!({ "reference": "203" }))
         .unwrap();
 
     assert_eq!(output["comments"], json!([]));
-    let schema = operation_output_schema(Operation::ReadTicket);
+    let schema = operation_output_schema(Operation::ReadWorkUnit);
     let validator = Validator::options().build(&schema).unwrap();
     assert!(
         validator.is_valid(&output),
@@ -197,7 +197,7 @@ fn read_ticket_with_zero_provider_comments_yields_an_empty_log() {
 }
 
 #[test]
-fn create_ticket_snapshot_carries_no_comment_log() {
+fn create_work_unit_snapshot_carries_no_comment_log() {
     let transport = GithubRecordingTransport::with_repeating_response(json!({
         "number": 203,
         "title": "Forge connectors",
@@ -208,7 +208,7 @@ fn create_ticket_snapshot_carries_no_comment_log() {
 
     let output = connector
         .call(
-            Operation::CreateTicket,
+            Operation::CreateWorkUnit,
             json!({ "title": "title", "body": "body" }),
         )
         .unwrap();
@@ -261,9 +261,9 @@ fn every_operation_constructs_the_expected_provider_request() {
     }));
     transport.push_response(json!([]));
     let cases = [
-        (Operation::ReadTicket, json!({"reference": "203"})),
+        (Operation::ReadWorkUnit, json!({"reference": "203"})),
         (
-            Operation::CreateTicket,
+            Operation::CreateWorkUnit,
             json!({"title": "title", "body": "body"}),
         ),
         (Operation::ClaimWorkUnit, json!({"handle": handle(203)})),
@@ -494,7 +494,7 @@ fn every_operation_rejects_http_error_status_without_success_receipts() {
 }
 
 #[test]
-fn production_http_transport_executes_and_parses_read_ticket() {
+fn production_http_transport_executes_and_parses_read_work_unit() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
@@ -527,7 +527,7 @@ fn production_http_transport_executes_and_parses_read_ticket() {
 
     let connector = GithubConnector::new(config(&format!("http://{address}")), GithubHttpTransport);
     let output = connector
-        .call(Operation::ReadTicket, json!({ "reference": "203" }))
+        .call(Operation::ReadWorkUnit, json!({ "reference": "203" }))
         .unwrap();
 
     assert_eq!(output["title"], "Harness title");
@@ -626,11 +626,11 @@ fn production_http_transport_executes_and_parses_every_operation() {
 
     let connector = GithubConnector::new(config(&format!("http://{address}")), GithubHttpTransport);
     let read = connector
-        .call(Operation::ReadTicket, json!({ "reference": "203" }))
+        .call(Operation::ReadWorkUnit, json!({ "reference": "203" }))
         .unwrap();
     let created = connector
         .call(
-            Operation::CreateTicket,
+            Operation::CreateWorkUnit,
             json!({"title": "title", "body": "body"}),
         )
         .unwrap();
