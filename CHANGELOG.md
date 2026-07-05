@@ -9,16 +9,17 @@ Semantic Versioning.
 
 ### Added
 
-- **`read-ticket` returns the ticket comment log** per forge-capability
-  `1.2.0` (tesserine/commons#100; contract constants re-pinned to
-  `commons@b229fb1`): the ticket snapshot carries an optional ordered
-  `comments` log — entries `{body, author?, created_at?}`, oldest first —
+- **`read-work-unit` returns the work-unit comment log** per forge-capability
+  `2.0.0` (tesserine/commons#106; contract constants re-pinned to
+  `e75e211`'s immutable v2 schema URL): the work-unit snapshot carries an
+  optional ordered `comments` log — entries `{body, author?, created_at?}`,
+  oldest first —
   declared in the contract crate's emitted operation schemas
   (`comment-entry` `$def`), mapped from GitHub issue comments and SourceHut
   comment-kind ticket events with per-provider normalization to ascending
-  timestamp order, inherited absent-or-empty by `create-ticket`'s output,
+  timestamp order, inherited absent-or-empty by `create-work-unit`'s output,
   and gated by provider conformance tests that validate returned snapshots
-  against the emitted `read-ticket` output schema with and without
+  against the emitted `read-work-unit` output schema with and without
   comments (a zero-comment ticket yields an empty or absent log, never an
   error).
 

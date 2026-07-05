@@ -215,7 +215,7 @@ config is the project-local default.
 
 When `[forge]` identifies a supported connector, `runa-mcp` composes the
 methodology artifact tools with forge tools for the canonical work-unit
-lifecycle: read/create ticket, claim work, record progress, deliver a change
+lifecycle: read/create work-unit, claim work, record progress, deliver a change
 proposal, reflect review disposition, apply an approved change, and close out.
 GitHub and SourceHut connector implementations are provided.
 

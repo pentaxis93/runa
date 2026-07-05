@@ -329,8 +329,8 @@ mod tests {
         });
 
         match operation {
-            Operation::ReadTicket => json!({ "reference": "203" }),
-            Operation::CreateTicket => json!({ "title": "title", "body": "body" }),
+            Operation::ReadWorkUnit => json!({ "reference": "203" }),
+            Operation::CreateWorkUnit => json!({ "title": "title", "body": "body" }),
             Operation::ClaimWorkUnit => json!({ "handle": work_unit }),
             Operation::RecordProgress => json!({ "handle": work_unit, "body": "progress" }),
             Operation::DeliverChangeProposal => json!({

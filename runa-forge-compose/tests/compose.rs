@@ -22,10 +22,10 @@ fn github_config_loads_a_forge_runtime_with_output_schemas() {
     .unwrap()
     .expect("github config should load a connector");
 
-    let read_ticket = runtime.tools.get("read-ticket").unwrap();
+    let read_work_unit = runtime.tools.get("read-work-unit").unwrap();
     assert_eq!(runtime.tools.len(), 8);
-    assert_eq!(read_ticket.operation.canonical_name(), "read-ticket");
-    assert!(read_ticket.output_schema.get("$defs").is_some());
+    assert_eq!(read_work_unit.operation.canonical_name(), "read-work-unit");
+    assert!(read_work_unit.output_schema.get("$defs").is_some());
 }
 
 #[test]
@@ -42,7 +42,7 @@ fn sourcehut_config_loads_a_forge_runtime() {
     .expect("sourcehut config should load a connector");
 
     assert_eq!(runtime.tools.len(), 8);
-    assert!(runtime.tools.contains_key("create-ticket"));
+    assert!(runtime.tools.contains_key("create-work-unit"));
 }
 
 #[test]
@@ -50,8 +50,8 @@ fn explicit_aliases_are_applied_at_composition() {
     let _env = EnvGuard::unset();
     let mut aliases = BTreeMap::new();
     aliases.insert(
-        "github:read-ticket".to_string(),
-        "work-unit-read-ticket".to_string(),
+        "github:read-work-unit".to_string(),
+        "work-unit-read-work-unit".to_string(),
     );
     let runtime = runtime_from_config(&ForgeConfig {
         forge_type: Some("github".to_string()),
@@ -63,8 +63,8 @@ fn explicit_aliases_are_applied_at_composition() {
     .unwrap()
     .expect("github config should load a connector");
 
-    assert!(!runtime.tools.contains_key("read-ticket"));
-    assert!(runtime.tools.contains_key("work-unit-read-ticket"));
+    assert!(!runtime.tools.contains_key("read-work-unit"));
+    assert!(runtime.tools.contains_key("work-unit-read-work-unit"));
 }
 
 #[test]
@@ -115,7 +115,7 @@ fn github_connector_coordinates_follow_resolved_env_identity() {
     .expect("github connector should compose from resolved identity");
 
     let output = runtime
-        .call_tool("read-ticket", json!({ "reference": "203" }))
+        .call_tool("read-work-unit", json!({ "reference": "203" }))
         .unwrap();
 
     assert!(
@@ -159,7 +159,7 @@ fn sourcehut_graphql_coordinates_follow_resolved_env_identity() {
     .expect("sourcehut connector should compose from resolved identity");
 
     let output = runtime
-        .call_tool("read-ticket", json!({ "reference": "203" }))
+        .call_tool("read-work-unit", json!({ "reference": "203" }))
         .unwrap();
 
     let requests = request_capture.lock().unwrap().clone();

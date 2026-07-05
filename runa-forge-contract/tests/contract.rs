@@ -7,7 +7,7 @@ use serde_json::json;
 use std::collections::HashMap;
 
 #[test]
-fn canonical_tool_set_exposes_all_v1_operations() {
+fn canonical_tool_set_exposes_all_v2_operations() {
     let set = canonical_forge_tool_set("github");
 
     validate_tool_set(&set).unwrap();
@@ -86,23 +86,35 @@ fn composition_accepts_role_qualified_aliases() {
 
     let composed = compose_tool_sets(&[github, sourcehut], &aliases).unwrap();
 
-    assert!(composed.contains_key("read-ticket"));
-    assert!(composed.contains_key("work-unit-read-ticket"));
+    assert!(composed.contains_key("read-work-unit"));
+    assert!(composed.contains_key("work-unit-read-work-unit"));
     assert_eq!(composed.len(), 16);
 }
 
 #[test]
 fn capability_constants_pin_the_canonical_version() {
-    assert_eq!(CAPABILITY_VERSION, "1.2.0");
+    assert_eq!(CAPABILITY_VERSION, "2.0.0");
     assert_eq!(
         COMMONS_PROVENANCE,
-        "commons@b229fb1a840c27ced31d582b40d766f4f441dcf6"
+        "https://raw.githubusercontent.com/tesserine/commons/e75e211689e92a4772614bfe6e4eca4b647d4d66/schemas/forge-capability/v2/forge-capability.schema.json"
     );
 }
 
 #[test]
-fn read_ticket_output_schema_admits_and_bounds_the_comment_log() {
-    let schema = operation_output_schema(Operation::ReadTicket);
+fn operation_serialization_uses_neutral_v2_read_create_names() {
+    assert_eq!(
+        serde_json::to_value(Operation::ReadWorkUnit).unwrap(),
+        json!("read-work-unit")
+    );
+    assert_eq!(
+        serde_json::to_value(Operation::CreateWorkUnit).unwrap(),
+        json!("create-work-unit")
+    );
+}
+
+#[test]
+fn read_work_unit_output_schema_admits_and_bounds_the_comment_log() {
+    let schema = operation_output_schema(Operation::ReadWorkUnit);
     let validator = Validator::options().build(&schema).unwrap();
     let handle = json!({"id": "github:tesserine/runa:issue:228", "display": "tesserine/runa#228"});
 
@@ -145,7 +157,7 @@ fn schemas_validate_representative_payloads() {
     let handle = json!({"id": "github:tesserine/runa:issue:203", "display": "tesserine/runa#203"});
     let cases = [
         (
-            Operation::ReadTicket,
+            Operation::ReadWorkUnit,
             json!({"reference": "tesserine/runa#203"}),
         ),
         (Operation::ClaimWorkUnit, json!({"handle": handle.clone()})),

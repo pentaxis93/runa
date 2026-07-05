@@ -294,8 +294,8 @@ impl<T: SourcehutTransport> ForgeConnector for SourcehutConnector<T> {
 
     fn call(&self, operation: Operation, input: Value) -> Result<Value, ForgeError> {
         match operation {
-            Operation::ReadTicket => self.read_ticket(input),
-            Operation::CreateTicket => self.create_ticket(input),
+            Operation::ReadWorkUnit => self.read_work_unit(input),
+            Operation::CreateWorkUnit => self.create_work_unit(input),
             Operation::ClaimWorkUnit => self.claim_work_unit(input),
             Operation::RecordProgress => self.record_progress(input),
             Operation::DeliverChangeProposal => self.deliver_change_proposal(input),
@@ -307,7 +307,7 @@ impl<T: SourcehutTransport> ForgeConnector for SourcehutConnector<T> {
 }
 
 impl<T: SourcehutTransport> SourcehutConnector<T> {
-    fn read_ticket(&self, input: Value) -> Result<Value, ForgeError> {
+    fn read_work_unit(&self, input: Value) -> Result<Value, ForgeError> {
         let reference = required_string(&input, "reference")?;
         let number = self.resolve_reference(reference)?;
         let tracker_rid = self.tracker_rid()?;
@@ -317,14 +317,14 @@ impl<T: SourcehutTransport> SourcehutConnector<T> {
             json!({ "id": number, "tracker": tracker_rid }),
         )?;
         let ticket = required_provider_object(&response, "/data/tracker/ticket", "ticket")?;
-        let mut snapshot = self.ticket_snapshot(number, ticket)?;
+        let mut snapshot = self.work_unit_snapshot(number, ticket)?;
         if let Some(entries) = comment_entries(ticket) {
             snapshot["comments"] = Value::Array(entries);
         }
         Ok(snapshot)
     }
 
-    fn create_ticket(&self, input: Value) -> Result<Value, ForgeError> {
+    fn create_work_unit(&self, input: Value) -> Result<Value, ForgeError> {
         let title = required_string(&input, "title")?;
         let body = required_string(&input, "body")?;
         let tracker_id = self.tracker_id_number()?;
@@ -335,7 +335,7 @@ impl<T: SourcehutTransport> SourcehutConnector<T> {
         )?;
         let ticket = required_provider_object(&response, "/data/submitTicket", "submitTicket")?;
         let number = ticket.get("id").and_then(Value::as_u64).unwrap_or(0);
-        self.ticket_snapshot(number, ticket)
+        self.work_unit_snapshot(number, ticket)
     }
 
     fn claim_work_unit(&self, input: Value) -> Result<Value, ForgeError> {
@@ -481,7 +481,7 @@ impl<T: SourcehutTransport> SourcehutConnector<T> {
         Ok(json!({ "handle": self.ticket_handle(number), "receipt": receipt(result, "closed") }))
     }
 
-    fn ticket_snapshot(&self, number: u64, ticket: &Value) -> Result<Value, ForgeError> {
+    fn work_unit_snapshot(&self, number: u64, ticket: &Value) -> Result<Value, ForgeError> {
         let number = if number == 0 {
             ticket
                 .get("id")

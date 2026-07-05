@@ -42,8 +42,8 @@ fn change() -> serde_json::Value {
 
 fn input_for_operation(operation: Operation) -> serde_json::Value {
     match operation {
-        Operation::ReadTicket => json!({"reference": "203"}),
-        Operation::CreateTicket => json!({"title": "title", "body": "body"}),
+        Operation::ReadWorkUnit => json!({"reference": "203"}),
+        Operation::CreateWorkUnit => json!({"title": "title", "body": "body"}),
         Operation::ClaimWorkUnit => json!({"handle": handle(203)}),
         Operation::RecordProgress => json!({"handle": handle(203), "body": "progress"}),
         Operation::DeliverChangeProposal => {
@@ -241,13 +241,13 @@ impl SourcehutTransport for SourcehutTrackerFakeTransport {
 }
 
 #[test]
-fn read_ticket_accepts_deployment_reference_forms_and_issues_scoped_handles() {
+fn read_work_unit_accepts_deployment_reference_forms_and_issues_scoped_handles() {
     let transport = SourcehutTrackerFakeTransport::default();
     let connector = SourcehutConnector::new(config("https://todo.test/query"), transport.clone());
 
     for reference in ["sourcehut:4#203", "#203", "203"] {
         let output = connector
-            .call(Operation::ReadTicket, json!({ "reference": reference }))
+            .call(Operation::ReadWorkUnit, json!({ "reference": reference }))
             .unwrap();
 
         assert_eq!(output["handle"]["id"], "sourcehut:tracker:4:ticket:203");
@@ -302,7 +302,7 @@ fn sourcehut_fake_rejects_numeric_tracker_id_as_tracker_rid() {
 }
 
 #[test]
-fn read_ticket_returns_the_comment_log_ordered_oldest_first_and_schema_valid() {
+fn read_work_unit_returns_the_comment_log_ordered_oldest_first_and_schema_valid() {
     let transport = SourcehutTrackerFakeTransport::with_ticket_events(json!({
         "results": [
             {
@@ -322,7 +322,7 @@ fn read_ticket_returns_the_comment_log_ordered_oldest_first_and_schema_valid() {
     let connector = SourcehutConnector::new(config("https://todo.test/query"), transport.clone());
 
     let output = connector
-        .call(Operation::ReadTicket, json!({ "reference": "203" }))
+        .call(Operation::ReadWorkUnit, json!({ "reference": "203" }))
         .unwrap();
 
     assert_eq!(
@@ -340,7 +340,7 @@ fn read_ticket_returns_the_comment_log_ordered_oldest_first_and_schema_valid() {
             }
         ])
     );
-    let schema = operation_output_schema(Operation::ReadTicket);
+    let schema = operation_output_schema(Operation::ReadWorkUnit);
     let validator = Validator::options().build(&schema).unwrap();
     assert!(
         validator.is_valid(&output),
@@ -349,16 +349,16 @@ fn read_ticket_returns_the_comment_log_ordered_oldest_first_and_schema_valid() {
 }
 
 #[test]
-fn read_ticket_with_zero_comment_events_yields_an_empty_log() {
+fn read_work_unit_with_zero_comment_events_yields_an_empty_log() {
     let transport = SourcehutTrackerFakeTransport::with_ticket_events(json!({ "results": [] }));
     let connector = SourcehutConnector::new(config("https://todo.test/query"), transport.clone());
 
     let output = connector
-        .call(Operation::ReadTicket, json!({ "reference": "203" }))
+        .call(Operation::ReadWorkUnit, json!({ "reference": "203" }))
         .unwrap();
 
     assert_eq!(output["comments"], json!([]));
-    let schema = operation_output_schema(Operation::ReadTicket);
+    let schema = operation_output_schema(Operation::ReadWorkUnit);
     let validator = Validator::options().build(&schema).unwrap();
     assert!(
         validator.is_valid(&output),
@@ -367,25 +367,25 @@ fn read_ticket_with_zero_comment_events_yields_an_empty_log() {
 }
 
 #[test]
-fn read_ticket_without_an_events_node_omits_the_log() {
+fn read_work_unit_without_an_events_node_omits_the_log() {
     let transport = SourcehutTrackerFakeTransport::default();
     let connector = SourcehutConnector::new(config("https://todo.test/query"), transport.clone());
 
     let output = connector
-        .call(Operation::ReadTicket, json!({ "reference": "203" }))
+        .call(Operation::ReadWorkUnit, json!({ "reference": "203" }))
         .unwrap();
 
     assert!(output.get("comments").is_none());
 }
 
 #[test]
-fn create_ticket_snapshot_carries_no_comment_log() {
+fn create_work_unit_snapshot_carries_no_comment_log() {
     let transport = SourcehutTrackerFakeTransport::default();
     let connector = SourcehutConnector::new(config("https://todo.test/query"), transport.clone());
 
     let output = connector
         .call(
-            Operation::CreateTicket,
+            Operation::CreateWorkUnit,
             json!({ "title": "title", "body": "body" }),
         )
         .unwrap();
@@ -428,13 +428,13 @@ fn every_operation_constructs_the_expected_provider_request() {
 
     let cases = [
         (
-            Operation::ReadTicket,
+            Operation::ReadWorkUnit,
             json!({"reference": "203"}),
             "GRAPHQL",
             "ticket",
         ),
         (
-            Operation::CreateTicket,
+            Operation::CreateWorkUnit,
             json!({"title": "title", "body": "body"}),
             "GRAPHQL",
             "submitTicket",
@@ -634,7 +634,7 @@ fn production_http_transport_rejects_graphql_errors_under_http_200() {
         SourcehutHttpTransport,
     );
     let error = connector
-        .call(Operation::ReadTicket, json!({ "reference": "203" }))
+        .call(Operation::ReadWorkUnit, json!({ "reference": "203" }))
         .unwrap_err();
 
     assert!(error.to_string().contains("GraphQL"));
@@ -678,7 +678,7 @@ fn sourcehut_schema_models_tracker_rid_and_tracker_listing_accessors() {
 }
 
 #[test]
-fn production_http_transport_executes_and_parses_read_ticket() {
+fn production_http_transport_executes_and_parses_read_work_unit() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
@@ -720,7 +720,7 @@ fn production_http_transport_executes_and_parses_read_ticket() {
         SourcehutHttpTransport,
     );
     let output = connector
-        .call(Operation::ReadTicket, json!({ "reference": "203" }))
+        .call(Operation::ReadWorkUnit, json!({ "reference": "203" }))
         .unwrap();
 
     assert_eq!(output["title"], "Harness title");
@@ -788,11 +788,11 @@ fn production_http_transport_executes_and_parses_every_graphql_operation() {
         SourcehutHttpTransport,
     );
     let read = connector
-        .call(Operation::ReadTicket, json!({ "reference": "203" }))
+        .call(Operation::ReadWorkUnit, json!({ "reference": "203" }))
         .unwrap();
     let created = connector
         .call(
-            Operation::CreateTicket,
+            Operation::CreateWorkUnit,
             json!({"title": "title", "body": "body"}),
         )
         .unwrap();
