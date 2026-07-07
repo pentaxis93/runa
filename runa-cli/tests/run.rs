@@ -1,5 +1,6 @@
 mod common;
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
@@ -25,6 +26,44 @@ fn init_project(project_dir: &std::path::Path, manifest_path: &std::path::Path) 
         "init failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+fn runa_mcp_bin_path() -> PathBuf {
+    Path::new(env!("CARGO_BIN_EXE_runa"))
+        .with_file_name(format!("runa-mcp{}", std::env::consts::EXE_SUFFIX))
+}
+
+fn transcript_event_files(root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    if root.exists() {
+        collect_transcript_event_files(root, &mut files);
+    }
+    files.sort();
+    files
+}
+
+fn collect_transcript_event_files(path: &Path, files: &mut Vec<PathBuf>) {
+    for entry in fs::read_dir(path).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            collect_transcript_event_files(&path, files);
+        } else if path.file_name().and_then(|name| name.to_str()) == Some("events.jsonl") {
+            files.push(path);
+        }
+    }
+}
+
+fn parsed_transcript_events(root: &Path) -> Vec<serde_json::Value> {
+    transcript_event_files(root)
+        .into_iter()
+        .flat_map(|path| {
+            fs::read_to_string(path)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 fn setup_quiescent_run_project() -> (tempfile::TempDir, PathBuf) {
@@ -120,6 +159,82 @@ trigger = { type = "on_artifact", name = "a" }
     .unwrap();
 
     (dir, project_dir)
+}
+
+fn setup_scoped_two_stage_transcript_project(dir: &Path) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+    let manifest_path = common::write_methodology(
+        dir,
+        r#"
+name = "groundwork"
+
+[[artifact_types]]
+name = "work-unit"
+
+[[artifact_types]]
+name = "claim"
+
+[[artifact_types]]
+name = "implementation"
+
+[[protocols]]
+name = "take"
+requires = ["work-unit"]
+produces = ["claim"]
+scoped = true
+trigger = { type = "on_artifact", name = "work-unit" }
+
+[[protocols]]
+name = "implement"
+requires = ["claim"]
+produces = ["implementation"]
+scoped = true
+trigger = { type = "on_artifact", name = "claim" }
+"#,
+        &[
+            (
+                "work-unit",
+                r#"{"type":"object","required":["title","description","acceptance_criteria"],"properties":{"title":{"type":"string"},"description":{"type":"string"},"acceptance_criteria":{"type":"array","items":{"type":"string"}}}}"#,
+            ),
+            (
+                "claim",
+                r#"{"type":"object","required":["work_unit","scope"],"properties":{"work_unit":{"type":"string"},"scope":{"type":"string"}}}"#,
+            ),
+            (
+                "implementation",
+                r#"{"type":"object","required":["work_unit","summary"],"properties":{"work_unit":{"type":"string"},"summary":{"type":"string"}}}"#,
+            ),
+        ],
+        &["take", "implement"],
+    );
+
+    let project_dir = dir.join("project");
+    fs::create_dir(&project_dir).unwrap();
+    init_project(&project_dir, &manifest_path);
+
+    let workspace = project_dir.join(".runa/workspace");
+    fs::create_dir_all(workspace.join("work-unit")).unwrap();
+    fs::write(
+        workspace.join("work-unit/work-unit-238.json"),
+        r#"{"title":"Transcript","description":"Keep one session run id","acceptance_criteria":["Honor supplied transcript run id"]}"#,
+    )
+    .unwrap();
+
+    let log_path = dir.join("executed.log");
+    let config_capture_dir = dir.join("mcp-configs");
+    let mcp_log_dir = dir.join("mcp-logs");
+    let agent_path = write_mcp_transcript_agent(dir);
+    append_agent_command_config(
+        &project_dir,
+        &[
+            agent_path.as_path(),
+            log_path.as_path(),
+            config_capture_dir.as_path(),
+            mcp_log_dir.as_path(),
+            runa_mcp_bin_path().as_path(),
+        ],
+    );
+
+    (project_dir, log_path, config_capture_dir, mcp_log_dir)
 }
 
 #[test]
@@ -512,6 +627,52 @@ fn write_reconciling_agent(dir: &Path) -> PathBuf {
     fs::write(
         &script_path,
         "#!/bin/sh\nlog_file=\"$1\"\npayload=$(cat)\ncase \"$payload\" in\n  *\"# Protocol: implement\"*)\n    printf 'implement\\n' >> \"$log_file\"\n    mkdir -p .runa/workspace/implementation\n    printf '%s\\n' '{\"done\":true}' > .runa/workspace/implementation/impl-1.json\n    ;;\n  *\"# Protocol: verify\"*)\n    printf 'verify\\n' >> \"$log_file\"\n    mkdir -p .runa/workspace/verified\n    printf '%s\\n' '{\"done\":true}' > .runa/workspace/verified/check-1.json\n    ;;\n  *)\n    printf '%s\\n' \"$payload\" > \"$log_file.unexpected\"\n    exit 19\n    ;;\nesac\n",
+    )
+    .unwrap();
+    fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755)).unwrap();
+    script_path
+}
+fn write_mcp_transcript_agent(dir: &Path) -> PathBuf {
+    let script_path = dir.join("mcp-transcript-agent.sh");
+    fs::write(
+        &script_path,
+        r##"#!/bin/sh
+set -eu
+log_file="$1"
+config_dir="$2"
+mcp_log_dir="$3"
+runa_mcp="$4"
+payload=$(cat)
+mkdir -p "$config_dir" "$mcp_log_dir"
+case "$payload" in
+  *"# Protocol: take"*)
+    protocol=take
+    tool=claim
+    arguments='{"instance_id":"claim-1","scope":"claimed"}'
+    ;;
+  *"# Protocol: implement"*)
+    protocol=implement
+    tool=implementation
+    arguments='{"instance_id":"impl-1","summary":"implemented"}'
+    ;;
+  *)
+    printf '%s\n' "$payload" > "$log_file.unexpected"
+    exit 19
+    ;;
+esac
+printf '%s\n' "$protocol" >> "$log_file"
+printf '%s' "$RUNA_MCP_CONFIG" > "$config_dir/$protocol.json"
+{
+  printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"run-transcript-test","version":"1.0.0"}}}'
+  printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+  printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"$tool\",\"arguments\":$arguments}}"
+  sleep 1
+} | "$runa_mcp" --protocol "$protocol" --work-unit work-unit-238 > "$mcp_log_dir/$protocol.jsonl"
+if grep -q '"error"' "$mcp_log_dir/$protocol.jsonl"; then
+  cat "$mcp_log_dir/$protocol.jsonl" >&2
+  exit 23
+fi
+"##,
     )
     .unwrap();
     fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755)).unwrap();
@@ -1258,6 +1419,180 @@ trigger = { type = "on_artifact", name = "implementation" }
     assert!(workspace.join("implementation/impl-1.json").is_file());
     assert!(workspace.join("verified/check-1.json").is_file());
 }
+
+#[test]
+fn run_transcript_honors_supplied_session_attribution_across_stages_and_mcp_events() {
+    let dir = tempfile::tempdir().unwrap();
+    let (project_dir, log_path, config_capture_dir, mcp_log_dir) =
+        setup_scoped_two_stage_transcript_project(dir.path());
+    let transcript_dir = dir.path().join("transcript");
+
+    let output = runa_bin()
+        .arg("run")
+        .arg("--work-unit")
+        .arg("work-unit-238")
+        .env("RUNA_TRANSCRIPT_DIR", &transcript_dir)
+        .env("RUNA_TRANSCRIPT_DEPLOYMENT", "agentd-test")
+        .env("RUNA_TRANSCRIPT_RUN_ID", "session-238")
+        .current_dir(&project_dir)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}\nmcp take: {}\nmcp implement: {}",
+        String::from_utf8_lossy(&output.stderr),
+        fs::read_to_string(mcp_log_dir.join("take.jsonl"))
+            .unwrap_or_else(|_| "<missing>".to_string()),
+        fs::read_to_string(mcp_log_dir.join("implement.jsonl"))
+            .unwrap_or_else(|_| "<missing>".to_string())
+    );
+    assert_eq!(fs::read_to_string(&log_path).unwrap(), "take\nimplement\n");
+
+    let expected_events_path = transcript_dir
+        .join("deployments/agentd-test/work-units/work-unit-238/runs/session-238/events.jsonl");
+    let event_files = transcript_event_files(&transcript_dir);
+    assert_eq!(event_files, vec![expected_events_path], "{event_files:?}");
+    assert!(
+        !transcript_dir
+            .join("deployments/agentd-test/work-units/work-unit-238/runs")
+            .read_dir()
+            .unwrap()
+            .any(|entry| entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("run-")),
+        "supplied run id should not have run-* siblings: {event_files:?}"
+    );
+
+    let events = parsed_transcript_events(&transcript_dir);
+    assert!(
+        events.iter().all(|event| event["run_id"] == "session-238"),
+        "{events:#?}"
+    );
+    assert!(
+        events
+            .iter()
+            .all(|event| event["deployment"] == "agentd-test"),
+        "{events:#?}"
+    );
+    assert!(
+        events
+            .iter()
+            .all(|event| event["work_unit"] == "work-unit-238"),
+        "{events:#?}"
+    );
+    let protocols = events
+        .iter()
+        .filter_map(|event| event["protocol"].as_str())
+        .collect::<BTreeSet<_>>();
+    assert!(protocols.contains("take"), "{events:#?}");
+    assert!(protocols.contains("implement"), "{events:#?}");
+    assert!(
+        events
+            .iter()
+            .any(|event| event["source"] == "runa" && event["kind"] == "agent_input"),
+        "{events:#?}"
+    );
+    assert!(
+        events.iter().any(|event| event["source"] == "runa-mcp"),
+        "{events:#?}"
+    );
+
+    for protocol in ["take", "implement"] {
+        let config: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(config_capture_dir.join(format!("{protocol}.json"))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            config["env"]["RUNA_TRANSCRIPT_RUN_ID"], "session-238",
+            "{config:#}"
+        );
+        assert_eq!(
+            config["env"]["RUNA_TRANSCRIPT_DEPLOYMENT"], "agentd-test",
+            "{config:#}"
+        );
+    }
+}
+
+#[test]
+fn run_transcript_mints_one_process_stable_run_id_when_run_id_is_unset() {
+    assert_unmanaged_run_uses_one_minted_run_id(None);
+}
+
+#[test]
+fn run_transcript_mints_one_process_stable_run_id_when_run_id_is_empty() {
+    assert_unmanaged_run_uses_one_minted_run_id(Some(""));
+}
+
+fn assert_unmanaged_run_uses_one_minted_run_id(run_id_env: Option<&str>) {
+    let dir = tempfile::tempdir().unwrap();
+    let (project_dir, log_path, _config_capture_dir, mcp_log_dir) =
+        setup_scoped_two_stage_transcript_project(dir.path());
+    let transcript_dir = dir.path().join("transcript");
+
+    let mut command = runa_bin();
+    command
+        .arg("run")
+        .arg("--work-unit")
+        .arg("work-unit-238")
+        .env("RUNA_TRANSCRIPT_DIR", &transcript_dir)
+        .env_remove("RUNA_TRANSCRIPT_DEPLOYMENT")
+        .current_dir(&project_dir);
+    match run_id_env {
+        Some(value) => {
+            command.env("RUNA_TRANSCRIPT_RUN_ID", value);
+        }
+        None => {
+            command.env_remove("RUNA_TRANSCRIPT_RUN_ID");
+        }
+    };
+
+    let output = command.output().unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}\nmcp take: {}\nmcp implement: {}",
+        String::from_utf8_lossy(&output.stderr),
+        fs::read_to_string(mcp_log_dir.join("take.jsonl"))
+            .unwrap_or_else(|_| "<missing>".to_string()),
+        fs::read_to_string(mcp_log_dir.join("implement.jsonl"))
+            .unwrap_or_else(|_| "<missing>".to_string())
+    );
+    assert_eq!(fs::read_to_string(&log_path).unwrap(), "take\nimplement\n");
+
+    let event_files = transcript_event_files(&transcript_dir);
+    assert_eq!(
+        event_files.len(),
+        1,
+        "one runa process should write one transcript event file: {event_files:?}"
+    );
+    let run_id = event_files[0]
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .unwrap();
+    assert!(run_id.starts_with("run-"), "{run_id}");
+    assert!(!run_id.is_empty(), "{event_files:?}");
+
+    let events = parsed_transcript_events(&transcript_dir);
+    assert!(
+        events.iter().all(|event| event["run_id"] == run_id),
+        "{events:#?}"
+    );
+    let protocols = events
+        .iter()
+        .filter_map(|event| event["protocol"].as_str())
+        .collect::<BTreeSet<_>>();
+    assert!(protocols.contains("take"), "{events:#?}");
+    assert!(protocols.contains("implement"), "{events:#?}");
+    assert!(
+        events.iter().any(|event| event["source"] == "runa-mcp"),
+        "{events:#?}"
+    );
+}
+
 #[test]
 fn run_without_dry_run_stops_after_current_cycle_when_sigint_arrives_mid_execution() {
     let dir = tempfile::tempdir().unwrap();

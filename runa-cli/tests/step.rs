@@ -2390,7 +2390,7 @@ trigger = { type = "on_artifact", name = "doc" }
         .output()
         .unwrap();
 
-    assert_eq!(output.status.code(), Some(5), "{output:?}");
+    assert_eq!(output.status.code(), Some(6), "{output:?}");
     assert!(
         !output.status.success(),
         "step should fail on non-zero agent exit"

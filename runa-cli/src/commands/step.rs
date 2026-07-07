@@ -471,13 +471,10 @@ pub(crate) fn execute_entry(
             &libagent::TranscriptConfig::default(),
         )
     });
+    let transcript_settings =
+        libagent::transcript::effective_transcript_settings(&transcript_settings);
     let transcript_capture_enabled =
         libagent::transcript::capture_enabled_with_settings(&transcript_settings);
-    let run_id = transcript_capture_enabled.then(libagent::transcript::new_run_id);
-    let transcript_settings = match run_id.as_deref() {
-        Some(run_id) => libagent::transcript::with_run_id(&transcript_settings, run_id),
-        None => transcript_settings,
-    };
     info!(
         operation = "agent_execution",
         outcome = "starting",
@@ -492,10 +489,8 @@ pub(crate) fn execute_entry(
         child.process_group(0);
     }
     let mut mcp_config = entry.mcp_config.clone();
-    if let Some(run_id) = &run_id {
-        mcp_config
-            .env
-            .insert(libagent::transcript::RUN_ID_ENV.to_string(), run_id.clone());
+    for (name, value) in libagent::transcript::transcript_env_from_settings(&transcript_settings) {
+        mcp_config.env.insert(name, value);
     }
     child
         .args(&agent_command[1..])
@@ -504,8 +499,8 @@ pub(crate) fn execute_entry(
             serde_json::to_string(&mcp_config).map_err(StepError::Json)?,
         )
         .envs(&options.extra_env);
-    if let Some(run_id) = &run_id {
-        child.env(libagent::transcript::RUN_ID_ENV, run_id);
+    for (name, value) in libagent::transcript::transcript_env_from_settings(&transcript_settings) {
+        child.env(name, value);
     }
     child.current_dir(working_dir).stdin(Stdio::piped());
     if transcript_capture_enabled {

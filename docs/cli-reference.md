@@ -146,6 +146,13 @@ replaced with `[REDACTED:<name>]` before events are written. Hidden model
 reasoning and runtime-private provider events are outside runa's observable
 boundary.
 
+`RUNA_TRANSCRIPT_DEPLOYMENT` and `RUNA_TRANSCRIPT_RUN_ID`, when set to
+non-empty values, override the derived deployment and minted run id for the
+whole live invocation. This lets an external session manager give every
+protocol stage and MCP tool event one stable attribution path. If
+`RUNA_TRANSCRIPT_RUN_ID` is absent or empty while capture is enabled, runa still
+mints a non-empty `run-*` id and reuses it for that runa process.
+
 ## Commands
 
 All commands accept a global `--config <PATH>` flag to override the config file location.
@@ -423,8 +430,8 @@ use the project-local identity without user-global shell state.
 - `RUNA_TRANSCRIPT_DIR` — Transcript directory override for one invocation.
 - `RUNA_TRANSCRIPT_REDACT_ENV` — Comma-separated transcript redaction-name
   override for one invocation.
-- `RUNA_TRANSCRIPT_DEPLOYMENT`, `RUNA_TRANSCRIPT_RUN_ID` — Internal transcript
-  attribution values propagated by runa into child MCP servers.
+- `RUNA_TRANSCRIPT_DEPLOYMENT`, `RUNA_TRANSCRIPT_RUN_ID` — Transcript
+  attribution overrides propagated by runa into child MCP servers.
 - `RUNA_FORGE_TYPE`, `RUNA_FORGE_OWNER`, `RUNA_FORGE_NAME`,
   `RUNA_FORGE_TRACKER_ID` — Forge identity field overrides for one
   invocation.
