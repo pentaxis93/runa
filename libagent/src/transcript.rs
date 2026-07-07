@@ -252,6 +252,20 @@ pub fn resolve_transcript_settings_with_forge(
     }
 }
 
+pub fn effective_transcript_settings(settings: &TranscriptSettings) -> TranscriptSettings {
+    let mut settings = settings.clone();
+    if settings.dir.is_some()
+        && settings
+            .run_id
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .is_none()
+    {
+        settings.run_id = Some(process_run_id().to_string());
+    }
+    settings
+}
+
 pub fn with_run_id(settings: &TranscriptSettings, run_id: impl Into<String>) -> TranscriptSettings {
     let mut settings = settings.clone();
     settings.run_id = Some(run_id.into());
@@ -407,9 +421,9 @@ mod tests {
     use super::{
         DEPLOYMENT_ENV, EVENTS_FILE_NAME, REDACT_ENV_ENV, RUN_ID_ENV, TRANSCRIPT_DIR_ENV,
         TranscriptEvent, TranscriptSettings, UNSCOPED_WORK_UNIT_COMPONENT, append_event,
-        append_event_with_settings, encode_path_component, event_file_path, redact_text,
-        redact_value, resolve_transcript_settings, resolve_transcript_settings_with_forge,
-        transcript_env_from_settings,
+        append_event_with_settings, effective_transcript_settings, encode_path_component,
+        event_file_path, redact_text, redact_value, resolve_transcript_settings,
+        resolve_transcript_settings_with_forge, transcript_env_from_settings,
     };
     use crate::project::{ForgeConfig, TranscriptConfig};
     use crate::scoped_identity::{
@@ -515,6 +529,43 @@ mod tests {
                 (RUN_ID_ENV.to_string(), "run-1".to_string())
             ]
         );
+    }
+
+    #[test]
+    fn effective_transcript_settings_preserves_supplied_run_id() {
+        let settings = TranscriptSettings {
+            dir: Some(PathBuf::from("/tmp/runa-transcript")),
+            run_id: Some("session-238".to_string()),
+            ..Default::default()
+        };
+
+        let effective = effective_transcript_settings(&settings);
+
+        assert_eq!(effective.run_id.as_deref(), Some("session-238"));
+    }
+
+    #[test]
+    fn effective_transcript_settings_materializes_one_process_run_id_when_capture_is_enabled() {
+        let settings = TranscriptSettings {
+            dir: Some(PathBuf::from("/tmp/runa-transcript")),
+            ..Default::default()
+        };
+
+        let first = effective_transcript_settings(&settings);
+        let second = effective_transcript_settings(&settings);
+
+        let first_run_id = first.run_id.as_deref().unwrap();
+        assert!(first_run_id.starts_with("run-"), "{first_run_id}");
+        assert_eq!(second.run_id.as_deref(), Some(first_run_id));
+    }
+
+    #[test]
+    fn effective_transcript_settings_leaves_disabled_capture_without_run_id() {
+        let settings = TranscriptSettings::default();
+
+        let effective = effective_transcript_settings(&settings);
+
+        assert_eq!(effective.run_id, None);
     }
 
     #[test]

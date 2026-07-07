@@ -66,6 +66,11 @@ Semantic Versioning.
 
 ### Fixed
 
+- Live transcript capture now honors non-empty `RUNA_TRANSCRIPT_RUN_ID` and
+  `RUNA_TRANSCRIPT_DEPLOYMENT` values across every `runa run` stage and child
+  `runa-mcp` tool event. Absent or empty run ids still mint a non-empty
+  process-stable `run-*` id, but a caller-supplied session id no longer gets
+  replaced by per-stage minted directories (tesserine/runa#238).
 - `run` now reports a session whose agent **fails to start** — the agent
   process exits without executing any protocol work or delivering any artifact
   — as `infrastructure_failure` (6) rather than `work_failed` (5). The outcome
