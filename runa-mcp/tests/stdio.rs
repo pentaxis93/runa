@@ -372,6 +372,34 @@ fn setup_project() -> tempfile::TempDir {
     dir
 }
 
+fn setup_optional_work_unit_project() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest_path = write_methodology(
+        dir.path(),
+        r#"
+name = "groundwork"
+
+[[artifact_types]]
+name = "research-record"
+
+[[protocols]]
+name = "research"
+produces = ["research-record"]
+scoped = true
+trigger = { type = "on_change", name = "research-record" }
+"#,
+        &[(
+            "research-record",
+            r#"{"type":"object","required":["title"],"properties":{"title":{"type":"string"},"work_unit":{"type":"string","pattern":"^[a-z][a-z0-9]*([-.][a-z0-9]+)*$"}}}"#,
+        )],
+        &["research"],
+    );
+    let project_dir = dir.path().join("project");
+    fs::create_dir(&project_dir).unwrap();
+    init_project(&project_dir, &manifest_path);
+    dir
+}
+
 #[test]
 fn session_ticket_flag_is_rejected() {
     let dir = setup_project();
@@ -2315,7 +2343,7 @@ async fn mcp_rejects_exact_tracker_backed_work_unit_with_number_disagreement() {
 }
 
 #[tokio::test]
-async fn scoped_protocol_writes_artifact_with_injected_work_unit() {
+async fn scoped_protocol_hides_and_overrides_required_work_unit() {
     let dir = setup_project();
     let project_dir = dir.path().join("project");
 
@@ -2338,13 +2366,20 @@ async fn scoped_protocol_writes_artifact_with_injected_work_unit() {
     let tools = service.list_all_tools().await.unwrap();
     assert_eq!(tools.len(), 1);
     assert_eq!(tools[0].name.as_ref(), "implementation");
+    let tool_properties = tools[0]
+        .input_schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+        .expect("tool schema should expose object properties");
+    assert!(!tool_properties.contains_key("work_unit"));
 
     service
         .call_tool(tool_call(
             "implementation",
             serde_json::json!({
                 "instance_id": "impl-1",
-                "title": "ship it"
+                "title": "ship it",
+                "work_unit": "foreign-spoof"
             }),
         ))
         .await
@@ -2719,40 +2754,18 @@ trigger = { type = "on_change", name = "implementation" }
 }
 
 #[tokio::test]
-async fn scoped_protocol_injects_optional_work_unit_declared_in_properties() {
-    let dir = tempfile::tempdir().unwrap();
-    let manifest_path = write_methodology(
-        dir.path(),
-        r#"
-name = "groundwork"
-
-[[artifact_types]]
-name = "implementation"
-
-[[protocols]]
-name = "implement"
-produces = ["implementation"]
-scoped = true
-trigger = { type = "on_change", name = "implementation" }
-"#,
-        &[(
-            "implementation",
-            r#"{"type":"object","required":["title"],"properties":{"title":{"type":"string"},"work_unit":{"type":"string"}}}"#,
-        )],
-        &["implement"],
-    );
+async fn scoped_protocol_preserves_omitted_optional_work_unit_as_cross_cutting() {
+    let dir = setup_optional_work_unit_project();
     let project_dir = dir.path().join("project");
-    fs::create_dir(&project_dir).unwrap();
-    init_project(&project_dir, &manifest_path);
 
     let service = ()
         .serve(
             TokioChildProcess::new(
                 Command::new(env!("CARGO_BIN_EXE_runa-mcp")).configure(|cmd| {
                     cmd.arg("--protocol")
-                        .arg("implement")
+                        .arg("research")
                         .arg("--work-unit")
-                        .arg("wu-1")
+                        .arg("work-unit-a")
                         .current_dir(&project_dir);
                 }),
             )
@@ -2763,19 +2776,19 @@ trigger = { type = "on_change", name = "implementation" }
 
     let tools = service.list_all_tools().await.unwrap();
     assert_eq!(tools.len(), 1);
-    assert_eq!(tools[0].name.as_ref(), "implementation");
+    assert_eq!(tools[0].name.as_ref(), "research-record");
     let tool_properties = tools[0]
         .input_schema
         .get("properties")
         .and_then(|value| value.as_object())
         .expect("tool schema should expose object properties");
-    assert!(!tool_properties.contains_key("work_unit"));
+    assert!(tool_properties.contains_key("work_unit"));
 
     service
         .call_tool(tool_call(
-            "implementation",
+            "research-record",
             serde_json::json!({
-                "instance_id": "impl-1",
+                "instance_id": "shared",
                 "title": "ship it"
             }),
         ))
@@ -2783,9 +2796,529 @@ trigger = { type = "on_change", name = "implementation" }
         .unwrap();
 
     let artifact =
-        fs::read_to_string(project_dir.join(".runa/workspace/implementation/impl-1.json")).unwrap();
+        fs::read_to_string(project_dir.join(".runa/workspace/research-record/shared.json"))
+            .unwrap();
     assert!(artifact.contains("\"title\": \"ship it\""), "{artifact}");
-    assert!(artifact.contains("\"work_unit\": \"wu-1\""), "{artifact}");
+    assert!(!artifact.contains("work_unit"), "{artifact}");
+    let store: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(project_dir.join(".runa/store/research-record/shared.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(store["work_unit"].is_null(), "{store}");
 
     service.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn scoped_protocol_preserves_explicit_own_optional_work_unit() {
+    let dir = setup_optional_work_unit_project();
+    let project_dir = dir.path().join("project");
+    let service = ()
+        .serve(
+            TokioChildProcess::new(
+                Command::new(env!("CARGO_BIN_EXE_runa-mcp")).configure(|cmd| {
+                    cmd.arg("--protocol")
+                        .arg("research")
+                        .arg("--work-unit")
+                        .arg("work-unit-a")
+                        .current_dir(&project_dir);
+                }),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    service
+        .call_tool(tool_call(
+            "research-record",
+            serde_json::json!({
+                "instance_id": "owned",
+                "title": "owned research",
+                "work_unit": "work-unit-a"
+            }),
+        ))
+        .await
+        .unwrap();
+
+    let artifact: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(project_dir.join(".runa/workspace/research-record/owned.json"))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(artifact["work_unit"], "work-unit-a");
+    let store: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(project_dir.join(".runa/store/research-record/owned.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(store["work_unit"], "work-unit-a");
+
+    service.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn scoped_protocol_rejects_foreign_optional_work_unit_without_persistence() {
+    let dir = setup_optional_work_unit_project();
+    let project_dir = dir.path().join("project");
+    let artifact_path = project_dir.join(".runa/workspace/research-record/shared.json");
+    fs::create_dir_all(artifact_path.parent().unwrap()).unwrap();
+    fs::write(&artifact_path, r#"{"title":"original"}"#).unwrap();
+
+    let service = ()
+        .serve(
+            TokioChildProcess::new(
+                Command::new(env!("CARGO_BIN_EXE_runa-mcp")).configure(|cmd| {
+                    cmd.arg("--protocol")
+                        .arg("research")
+                        .arg("--work-unit")
+                        .arg("work-unit-a")
+                        .current_dir(&project_dir);
+                }),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let store_path = project_dir.join(".runa/store/research-record/shared.json");
+    let artifact_before = fs::read(&artifact_path).unwrap();
+    let store_before = fs::read(&store_path).unwrap();
+
+    let result = service
+        .call_tool(tool_call(
+            "research-record",
+            serde_json::json!({
+                "instance_id": "shared",
+                "title": "unauthorized update",
+                "work_unit": "work-unit-b"
+            }),
+        ))
+        .await
+        .unwrap();
+    let message = tool_result_text(&result);
+
+    assert!(
+        message.contains("work_unit authority mismatch"),
+        "{message}"
+    );
+    assert!(message.contains("work-unit-a"), "{message}");
+    assert!(message.contains("work-unit-b"), "{message}");
+    assert_eq!(fs::read(&artifact_path).unwrap(), artifact_before);
+    assert_eq!(fs::read(&store_path).unwrap(), store_before);
+
+    service.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn scoped_protocol_rejects_malformed_optional_work_unit_before_authority_and_persistence() {
+    let dir = setup_optional_work_unit_project();
+    let project_dir = dir.path().join("project");
+    let artifact_path = project_dir.join(".runa/workspace/research-record/shared.json");
+    fs::create_dir_all(artifact_path.parent().unwrap()).unwrap();
+    fs::write(&artifact_path, r#"{"title":"original"}"#).unwrap();
+
+    let service = ()
+        .serve(
+            TokioChildProcess::new(
+                Command::new(env!("CARGO_BIN_EXE_runa-mcp")).configure(|cmd| {
+                    cmd.arg("--protocol")
+                        .arg("research")
+                        .arg("--work-unit")
+                        .arg("work-unit-a")
+                        .current_dir(&project_dir);
+                }),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let store_path = project_dir.join(".runa/store/research-record/shared.json");
+    let artifact_before = fs::read(&artifact_path).unwrap();
+    let store_before = fs::read(&store_path).unwrap();
+
+    let result = service
+        .call_tool(tool_call(
+            "research-record",
+            serde_json::json!({
+                "instance_id": "shared",
+                "title": "malformed update",
+                "work_unit": "Bad/Scope"
+            }),
+        ))
+        .await
+        .unwrap();
+    let message = tool_result_text(&result);
+
+    assert!(message.contains("/work_unit"), "{message}");
+    assert!(!message.contains("authority mismatch"), "{message}");
+    assert_eq!(fs::read(&artifact_path).unwrap(), artifact_before);
+    assert_eq!(fs::read(&store_path).unwrap(), store_before);
+
+    service.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn groundwork_required_scoped_tools_hide_inject_and_persist_runtime_scope() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest_path = write_methodology(
+        dir.path(),
+        r#"
+name = "groundwork"
+
+[[artifact_types]]
+name = "contract"
+
+[[artifact_types]]
+name = "test-evidence"
+
+[[protocols]]
+name = "deliver"
+produces = ["contract", "test-evidence"]
+scoped = true
+trigger = { type = "on_change", name = "contract" }
+"#,
+        &[
+            (
+                "contract",
+                include_str!("fixtures/groundwork-scoping/contract.schema.json"),
+            ),
+            (
+                "test-evidence",
+                include_str!("fixtures/groundwork-scoping/test-evidence.schema.json"),
+            ),
+        ],
+        &["deliver"],
+    );
+    let project_dir = dir.path().join("project");
+    fs::create_dir(&project_dir).unwrap();
+    init_project(&project_dir, &manifest_path);
+    let service = ()
+        .serve(
+            TokioChildProcess::new(
+                Command::new(env!("CARGO_BIN_EXE_runa-mcp")).configure(|cmd| {
+                    cmd.arg("--protocol")
+                        .arg("deliver")
+                        .arg("--work-unit")
+                        .arg("work-unit-a")
+                        .current_dir(&project_dir);
+                }),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let tools = service.list_all_tools().await.unwrap();
+    for name in ["contract", "test-evidence"] {
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name.as_ref() == name)
+            .expect("Groundwork output tool should be served");
+        assert!(tool.input_schema["properties"].get("work_unit").is_none());
+    }
+
+    service
+        .call_tool(tool_call(
+            "contract",
+            serde_json::json!({
+                "instance_id": "scope-contract",
+                "work_unit": "work-unit-b",
+                "title": "Scope contract",
+                "criteria": [{
+                    "id": "scope",
+                    "lens": "behavior",
+                    "acceptance_criterion": "AC1",
+                    "statement": "Scope remains protected.",
+                    "hollow_delivery": "Foreign scope persists.",
+                    "kind": "behavior",
+                    "check": {
+                        "actor": "test",
+                        "procedure": "deliver",
+                        "observable": "canonical scope",
+                        "conforming_case": "own scope",
+                        "falsifying_case": "foreign scope"
+                    }
+                }]
+            }),
+        ))
+        .await
+        .unwrap();
+    service
+        .call_tool(tool_call(
+            "test-evidence",
+            serde_json::json!({
+                "instance_id": "scope-evidence",
+                "evidence": [{
+                    "criterion_id": "scope",
+                    "result": "pass",
+                    "command": "cargo test",
+                    "output_summary": "scope test passed"
+                }]
+            }),
+        ))
+        .await
+        .unwrap();
+
+    for (kind, instance) in [
+        ("contract", "scope-contract"),
+        ("test-evidence", "scope-evidence"),
+    ] {
+        let artifact: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(
+                project_dir.join(format!(".runa/workspace/{kind}/{instance}.json")),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(artifact["work_unit"], "work-unit-a");
+        let store: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(project_dir.join(format!(".runa/store/{kind}/{instance}.json")))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(store["work_unit"], "work-unit-a");
+    }
+
+    service.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn cross_cutting_research_updated_in_a_is_visible_in_b_context_with_updated_hash() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest_path = write_methodology(
+        dir.path(),
+        r#"
+name = "groundwork"
+
+[[artifact_types]]
+name = "work-unit"
+
+[[artifact_types]]
+name = "research-request"
+
+[[artifact_types]]
+name = "consume-request"
+
+[[artifact_types]]
+name = "research-record"
+
+[[artifact_types]]
+name = "contract"
+
+[[artifact_types]]
+name = "result"
+
+[[protocols]]
+name = "research"
+requires = ["research-request"]
+accepts = ["contract"]
+produces = ["research-record"]
+scoped = true
+trigger = { type = "on_change", name = "research-request" }
+
+[[protocols]]
+name = "consume"
+requires = ["consume-request"]
+accepts = ["research-record", "contract"]
+produces = ["result"]
+scoped = true
+trigger = { type = "on_artifact", name = "consume-request" }
+"#,
+        &[
+            (
+                "work-unit",
+                r#"{"type":"object","required":["title","description","acceptance_criteria"],"properties":{"title":{"type":"string"},"description":{"type":"string"},"acceptance_criteria":{"type":"array","items":{"type":"string"}},"handle":{"type":"object"}}}"#,
+            ),
+            (
+                "research-request",
+                r#"{"type":"object","required":["work_unit","topic"],"properties":{"work_unit":{"type":"string"},"topic":{"type":"string"}}}"#,
+            ),
+            (
+                "consume-request",
+                r#"{"type":"object","required":["work_unit","topic"],"properties":{"work_unit":{"type":"string"},"topic":{"type":"string"}}}"#,
+            ),
+            (
+                "research-record",
+                include_str!("fixtures/groundwork-scoping/research-record.schema.json"),
+            ),
+            (
+                "contract",
+                include_str!("fixtures/groundwork-scoping/contract.schema.json"),
+            ),
+            (
+                "result",
+                r#"{"type":"object","required":["work_unit","summary"],"properties":{"work_unit":{"type":"string"},"summary":{"type":"string"}}}"#,
+            ),
+        ],
+        &["research", "consume"],
+    );
+    let project_dir = dir.path().join("project");
+    fs::create_dir(&project_dir).unwrap();
+    init_project(&project_dir, &manifest_path);
+    let workspace = project_dir.join(".runa/workspace");
+    for (number, request_type) in [(166, "research-request"), (167, "consume-request")] {
+        fs::create_dir_all(workspace.join("work-unit")).unwrap();
+        fs::write(
+            workspace.join(format!("work-unit/work-unit-{number}.json")),
+            github_work_unit_json(number),
+        )
+        .unwrap();
+        fs::create_dir_all(workspace.join(request_type)).unwrap();
+        fs::write(
+            workspace.join(format!("{request_type}/request-{number}.json")),
+            format!(r#"{{"work_unit":"work-unit-{number}","topic":"initial-request"}}"#),
+        )
+        .unwrap();
+    }
+    fs::create_dir_all(workspace.join("research-record")).unwrap();
+    fs::write(
+        workspace.join("research-record/shared.json"),
+        r#"{"topic":"shared-research","findings":["old"],"sources":[{"url":"https://example.com/old"}]}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(workspace.join("contract")).unwrap();
+    fs::write(
+        workspace.join("contract/a-contract.json"),
+        r#"{"work_unit":"work-unit-166","title":"A contract","criteria":[{"id":"scope","lens":"behavior","acceptance_criterion":"AC1","statement":"Owner visibility.","hollow_delivery":"Foreign visibility.","kind":"behavior","check":{"actor":"test","procedure":"read context","observable":"owner only","conforming_case":"A sees it","falsifying_case":"B sees it"}}]}"#,
+    )
+    .unwrap();
+
+    let baseline = ()
+        .serve(
+            TokioChildProcess::new(
+                Command::new(env!("CARGO_BIN_EXE_runa-mcp")).configure(|cmd| {
+                    cmd.arg("--session")
+                        .arg("--work-unit")
+                        .arg("work-unit-166")
+                        .env_remove("RUNA_FORGE_TYPE")
+                        .env_remove("RUNA_FORGE_TRACKER_ID")
+                        .env("RUNA_FORGE_OWNER", "tesserine")
+                        .env("RUNA_FORGE_NAME", "runa")
+                        .current_dir(&project_dir);
+                }),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    baseline.cancel().await.unwrap();
+    fs::write(
+        workspace.join("research-request/request-166.json"),
+        r#"{"work_unit":"work-unit-166","topic":"shared-research"}"#,
+    )
+    .unwrap();
+
+    let session_a = ()
+        .serve(
+            TokioChildProcess::new(
+                Command::new(env!("CARGO_BIN_EXE_runa-mcp")).configure(|cmd| {
+                    cmd.arg("--session")
+                        .arg("--work-unit")
+                        .arg("work-unit-166")
+                        .env_remove("RUNA_FORGE_TYPE")
+                        .env_remove("RUNA_FORGE_TRACKER_ID")
+                        .env("RUNA_FORGE_OWNER", "tesserine")
+                        .env("RUNA_FORGE_NAME", "runa")
+                        .current_dir(&project_dir);
+                }),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let context_a = session_a
+        .call_tool(session_call("next-protocol-context"))
+        .await
+        .unwrap();
+    let context_a: serde_json::Value = serde_json::from_str(&tool_result_text(&context_a)).unwrap();
+    assert!(
+        context_a["context"]["inputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|input| input["artifact_type"] == "contract")
+    );
+    session_a
+        .call_tool(tool_call(
+            "research-record",
+            serde_json::json!({
+                "instance_id": "shared",
+                "topic": "shared-research",
+                "findings": ["updated from A"],
+                "sources": [{"url": "https://example.com/updated"}]
+            }),
+        ))
+        .await
+        .unwrap();
+    session_a.cancel().await.unwrap();
+
+    let artifact: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(workspace.join("research-record/shared.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(artifact.get("work_unit").is_none());
+    let store: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(project_dir.join(".runa/store/research-record/shared.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(store["work_unit"].is_null());
+    let updated_hash = store["content_hash"].as_str().unwrap().to_string();
+    let artifact_bytes_before_b = fs::read(workspace.join("research-record/shared.json")).unwrap();
+    let store_bytes_before_b =
+        fs::read(project_dir.join(".runa/store/research-record/shared.json")).unwrap();
+
+    let session_b = ()
+        .serve(
+            TokioChildProcess::new(
+                Command::new(env!("CARGO_BIN_EXE_runa-mcp")).configure(|cmd| {
+                    cmd.arg("--session")
+                        .arg("--work-unit")
+                        .arg("work-unit-167")
+                        .env_remove("RUNA_FORGE_TYPE")
+                        .env_remove("RUNA_FORGE_TRACKER_ID")
+                        .env("RUNA_FORGE_OWNER", "tesserine")
+                        .env("RUNA_FORGE_NAME", "runa")
+                        .current_dir(&project_dir);
+                }),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let context = session_b
+        .call_tool(session_call("next-protocol-context"))
+        .await
+        .unwrap();
+    let context: serde_json::Value = serde_json::from_str(&tool_result_text(&context)).unwrap();
+    let research = context["context"]["inputs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|input| input["artifact_type"] == "research-record")
+        .expect("B context should receive the cross-cutting research record");
+    assert_eq!(research["instance_id"], "shared");
+    assert_eq!(research["content_hash"], updated_hash);
+    assert!(
+        context["context"]["inputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|input| input["artifact_type"] != "contract"),
+        "B must not receive A's required-scoped contract: {context}"
+    );
+    assert!(
+        context["rendered_prompt"]
+            .as_str()
+            .unwrap()
+            .contains("updated from A")
+    );
+
+    session_b.cancel().await.unwrap();
+    assert_eq!(
+        fs::read(workspace.join("research-record/shared.json")).unwrap(),
+        artifact_bytes_before_b
+    );
+    assert_eq!(
+        fs::read(project_dir.join(".runa/store/research-record/shared.json")).unwrap(),
+        store_bytes_before_b
+    );
 }

@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/tesserine/groundwork/main/schemas/contract.schema.json",
+  "title": "Contract",
+  "description": "Validates the content of a contract artifact. Every criterion carries exactly one content kind - behavior (execution-native) or meaning (reconstruction-native) - and an operational check stating actor, procedure, observable, and declared conforming and falsifying cases, per ADR-0010. The lens names the criterion's source and coverage; the kind selects the native check.",
+  "type": "object",
+  "required": ["work_unit", "title", "criteria"],
+  "additionalProperties": false,
+  "properties": {
+    "work_unit": {
+      "type": "string",
+      "description": "Common envelope - threads to work unit.",
+      "pattern": "^[a-z][a-z0-9]*([-.][a-z0-9]+)*$"
+    },
+    "title": {
+      "type": "string",
+      "description": "Human-readable title for the contract.",
+      "minLength": 1
+    },
+    "criteria": {
+      "type": "array",
+      "description": "Contract criteria: kind-typed, lens-sourced, operationally checked.",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "lens",
+          "acceptance_criterion",
+          "statement",
+          "hollow_delivery",
+          "kind",
+          "check"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Stable criterion identifier used by completion evidence.",
+            "pattern": "^[a-z][a-z0-9]*([-.][a-z0-9]+)*$"
+          },
+          "lens": {
+            "type": "string",
+            "description": "Source and coverage lens for this criterion - where it comes from and what the change must cover, such as behavior, documentation, or code-quality. A lens never determines how the criterion is checked.",
+            "pattern": "^[a-z][a-z0-9]*([-.][a-z0-9]+)*$"
+          },
+          "acceptance_criterion": {
+            "type": "string",
+            "description": "Source for this contract criterion: numbered work-unit acceptance criterion or explicit body-ground obligation.",
+            "minLength": 1
+          },
+          "statement": {
+            "type": "string",
+            "description": "Concrete definition of done for this criterion.",
+            "minLength": 1
+          },
+          "hollow_delivery": {
+            "type": "string",
+            "description": "A delivery that would appear plausible but fail this criterion.",
+            "minLength": 1
+          },
+          "kind": {
+            "type": "string",
+            "description": "Content kind - the closed two-kind set ADR-0010 ratifies. behavior: what the artifact does, natively checked by execution. meaning: the argument or distinction the artifact transmits, natively checked by reconstruction against a stated proposition. The set grows only by ADR.",
+            "enum": ["behavior", "meaning"]
+          },
+          "check": {
+            "type": "object",
+            "description": "The check as an operational procedure - contract content, independent of where the check runs.",
+            "required": [
+              "actor",
+              "procedure",
+              "observable",
+              "conforming_case",
+              "falsifying_case"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "actor": {
+                "type": "string",
+                "description": "Who or what performs the check: the system under test, an instantiated cold recipient, or a fitness function.",
+                "minLength": 1
+              },
+              "procedure": {
+                "type": "string",
+                "description": "The steps the actor performs.",
+                "minLength": 1
+              },
+              "observable": {
+                "type": "string",
+                "description": "The pass/fail the procedure yields.",
+                "minLength": 1
+              },
+              "conforming_case": {
+                "type": "string",
+                "description": "A concrete input or delivery that passes the check.",
+                "minLength": 1
+              },
+              "falsifying_case": {
+                "type": "string",
+                "description": "A concrete input or delivery that fails the check.",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

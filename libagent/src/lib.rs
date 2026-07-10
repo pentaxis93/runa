@@ -29,6 +29,7 @@ pub mod project;
 pub mod projection;
 pub mod protocol_failure;
 pub mod scan;
+pub mod schema_scope;
 pub mod scoped_identity;
 pub mod selection;
 pub mod session;
@@ -68,6 +69,7 @@ pub use scan::{
     ArtifactRef, InvalidArtifact, MalformedArtifact, PartiallyScannedType, ScanError, ScanResult,
     UnreadableArtifact, scan,
 };
+pub use schema_scope::{WorkUnitOwnership, WorkUnitSchemaError, analyze_work_unit_ownership};
 pub use scoped_identity::{
     ResolvedForgeIdentity, ScopedWorkUnitError, find_work_unit_by_tracker_identity,
     resolve_forge_environment, resolve_forge_identity, validate_scoped_work_unit,
@@ -96,7 +98,7 @@ pub use store::{
     ValidationStatus, execution_contract_hash,
 };
 pub use trigger::{TriggerContext, TriggerResult, evaluate as evaluate_trigger};
-pub use validation::{ValidationError, Violation};
+pub use validation::{ValidationError, Violation, validate_artifact_field};
 
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")

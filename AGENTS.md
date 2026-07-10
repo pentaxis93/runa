@@ -61,16 +61,21 @@ type name.
 
 **Tool input schema.** Each tool's input schema is derived from the artifact
 type's JSON Schema with two modifications:
-- `work_unit` is removed — the server injects it automatically from the
-  execution context.
+- When the effective schema requires `work_unit`, the field is removed from
+  agent input and the server injects the delegated canonical work unit.
+- When the effective schema declares optional `work_unit`, the field remains
+  optional agent input. Omission means cross-cutting output; an explicit value
+  must equal the delegated work unit and is preserved unchanged.
 - `instance_id` is added as a required string field — the agent supplies this
   to name the artifact instance. It becomes the filename:
   `<workspace>/<type_name>/<instance_id>.json`.
 
-**Validation.** The server validates the artifact against the full schema
-(including the injected `work_unit`) before writing it to the workspace.
-Invalid artifacts are rejected with validation error details and never written
-to disk.
+**Validation.** Required scope is injected before complete validation. For an
+optional declaration, runa validates the field's schema shape, checks its
+authority against the delegated work unit, and then validates the complete
+artifact. Malformed, foreign, and otherwise invalid artifacts are rejected
+before either workspace or store persistence. If schema ownership cannot be
+resolved safely, the output type fails closed instead of guessing.
 
 **Postcondition enforcement.** After the agent process exits, `runa step`
 re-scans the workspace and enforces postconditions: every `produces` artifact

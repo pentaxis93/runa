@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/tesserine/groundwork/main/schemas/research-record.schema.json",
+  "title": "Research Record",
+  "description": "Validates the content of a research-record artifact. Research scoped by topic; optionally scoped by work unit when research is specific to a work unit.",
+  "type": "object",
+  "required": ["topic", "findings", "sources"],
+  "additionalProperties": false,
+  "properties": {
+    "topic": {
+      "type": "string",
+      "description": "Kebab-case slug identifying the research topic.",
+      "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$"
+    },
+    "work_unit": {
+      "type": "string",
+      "description": "Optional work-unit reference. When present, scopes this research to a specific work unit. When absent, research is cross-cutting.",
+      "pattern": "^[a-z][a-z0-9]*([-.][a-z0-9]+)*$"
+    },
+    "findings": {
+      "type": "array",
+      "description": "Key findings from the research.",
+      "minItems": 1,
+      "items": {
+        "type": "string"
+      }
+    },
+    "sources": {
+      "type": "array",
+      "description": "Sources consulted during research.",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/source"
+      }
+    }
+  },
+  "$defs": {
+    "source": {
+      "type": "object",
+      "description": "A source consulted during research.",
+      "required": ["url"],
+      "additionalProperties": false,
+      "properties": {
+        "url": {
+          "type": "string",
+          "description": "URL of the source.",
+          "format": "uri",
+          "minLength": 1
+        },
+        "title": {
+          "type": "string",
+          "description": "Optional title of the source."
+        }
+      }
+    }
+  }
+}

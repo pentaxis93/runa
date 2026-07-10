@@ -29,6 +29,48 @@ fn string_array(values: &[&str]) -> Vec<toml::Value> {
 }
 
 #[test]
+fn work_unit_ownership_has_one_source_and_consistent_documentation() {
+    let analyzer = read_workspace_file("libagent/src/schema_scope.rs");
+    assert!(analyzer.contains("RuntimeRequired"));
+    assert!(analyzer.contains("PayloadOptional"));
+    assert!(analyzer.contains("Absent"));
+
+    for source in [
+        "libagent/src/model.rs",
+        "runa-mcp/src/handler.rs",
+        "ARCHITECTURE.md",
+    ] {
+        let content = read_workspace_file(source);
+        assert!(
+            !content.contains("schema_mentions_work_unit"),
+            "{source} must not restore mention-based scope ownership"
+        );
+    }
+
+    for document in [
+        "AGENTS.md",
+        "docs/interface-contract.md",
+        "docs/session-surface-contract.md",
+        "docs/cli-reference.md",
+        "ARCHITECTURE.md",
+    ] {
+        let content = read_workspace_file(document);
+        assert!(content.contains("required"), "{document}");
+        assert!(content.contains("optional"), "{document}");
+        assert!(content.contains("cross-cutting"), "{document}");
+    }
+
+    let agent_contract = read_workspace_file("AGENTS.md");
+    assert!(
+        !agent_contract.contains("`work_unit` is removed — the server injects it automatically")
+    );
+    let cli_contract = read_workspace_file("docs/cli-reference.md");
+    assert!(!cli_contract.contains(
+        "with the `work_unit` field removed — the server injects `work_unit` automatically"
+    ));
+}
+
+#[test]
 fn cargo_release_configuration_lives_at_the_workspace_root() {
     assert!(
         workspace_root().join("release.toml").is_file(),

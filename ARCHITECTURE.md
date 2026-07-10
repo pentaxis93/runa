@@ -68,7 +68,17 @@ fails loudly on exposed tool-name collisions.
 
 ### `model.rs`
 
-Core types: `Manifest`, `ArtifactType`, `ProtocolDeclaration`, `TriggerCondition`. `ArtifactType` exposes the shared top-level `schema_requires_work_unit` predicate used by both manifest parsing and MCP output validation. `ProtocolDeclaration` includes `scoped: bool` metadata (default `false`) plus an `instructions: Option<String>` field populated by `manifest::parse` with the protocol's `PROTOCOL.md` content (`None` from `from_str`). `TriggerCondition` is a tagged enum (`#[serde(tag = "type", rename_all = "snake_case")]`) with five variants: `OnArtifact`, `OnChange`, `OnInvalid`, `AllOf`, `AnyOf`. `AllOf`/`AnyOf` hold `Vec<TriggerCondition>` for arbitrary nesting depth.
+Core types: `Manifest`, `ArtifactType`, `ProtocolDeclaration`, `TriggerCondition`. `ArtifactType` delegates `work_unit` ownership to `schema_scope` instead of carrying a mention-based heuristic. `ProtocolDeclaration` includes `scoped: bool` metadata (default `false`) plus an `instructions: Option<String>` field populated by `manifest::parse` with the protocol's `PROTOCOL.md` content (`None` from `from_str`). `TriggerCondition` is a tagged enum (`#[serde(tag = "type", rename_all = "snake_case")]`) with five variants: `OnArtifact`, `OnChange`, `OnInvalid`, `AllOf`, `AnyOf`. `AllOf`/`AnyOf` hold `Vec<TriggerCondition>` for arbitrary nesting depth.
+
+### `schema_scope.rs`
+
+The single bounded analyzer for output `work_unit` ownership. It returns
+`RuntimeRequired`, `PayloadOptional`, or `Absent` from effective schema
+requiredness, resolving local JSON Pointer references with Draft 2020-12
+sibling semantics plus supported `allOf` and uniform viable `anyOf`/`oneOf`
+composition. Cycles, external or unresolved references, mixed ownership, and
+conditional/dependency/negation forms fail closed with schema-location
+diagnostics. It is deliberately not a general JSON Schema evaluator.
 
 ### `manifest.rs`
 
@@ -95,6 +105,13 @@ Stable agent-facing context injection contract plus prompt rendering. `build_con
 Artifact state tracking keyed by `(type_name, instance_id)`. Each `ArtifactState` records the filesystem path, `ValidationStatus` (Valid, Invalid with violations, Malformed with a parse error, or Stale), millisecond-precision modification timestamp, a `sha256:<hex>` content hash, a `schema_hash` for the artifact type schema used during validation, and an optional `work_unit` string extracted from artifact JSON at record time. Parsed JSON uses canonical JSON hashing (recursively sorted keys); malformed files hash raw bytes. Persists artifact state as JSON files under `.runa/store/{type_name}/{instance_id}.json` using a byte-preserving path encoding (`unix_bytes` on Unix, `windows_wide` on Windows) plus a lossy `display_path` for inspection, and still accepts legacy string-path store records on load. Separately persists execution metadata in `.runa/store/execution-records.json`: a manifest-contract hash plus per-`(protocol, work_unit)` records of the freshness-relevant input snapshot from the last successful execution, including invalid or malformed instances only for inputs whose freshness mode is `AnyRecorded`, and an append-only supersession lineage — each entry the target `(protocol, work_unit)`, an auditable reason, the rejected output revisions with their preserved content, and the execution record the disposition displaced. A supersession is pending while its pair has no current record; pendingness is computed from that relation, never stored, so any recording path resolves it. Uses atomic write (tmp + rename). Separately, the store keeps non-persisted scan-gap metadata for the current process so completion/freshness checks can distinguish whole-type scan failures from unreadable specific instances.
 
 Query methods (`is_valid`, `has_any_invalid`, `instances_of`, `latest_modification_ms`) accept an `Option<&str>` work unit filter. `None` returns all instances (unscoped). `Some(wu)` returns instances matching that work unit plus unpartitioned instances (those with no `work_unit` field). This scoping threads through trigger evaluation, enforcement, and context injection.
+
+Artifact content remains the only durable source of an artifact's scope
+binding: `ArtifactStore::build_state_from_json` extracts an optional string and
+stores no hidden session scope. An omitted payload-owned optional binding is
+therefore cross-cutting. Consequently optional-scope delivery changes
+need no artifact or execution-record migration; loading, scanning, state
+evaluation, and context construction do not rewrite historical records.
 
 ### `scan.rs`
 
@@ -178,7 +195,7 @@ surface.
 
 ### `handler.rs`
 
-`ServerHandler` implementation. `RunaHandler` derives one MCP tool per output artifact type (`produces` + required output choice members + viable `may_produce`), with tool input schemas derived from artifact type JSON Schemas (with `work_unit` stripped). `validate_protocol_scope` rejects scoped protocols without `--work-unit` and unscoped protocols with one. `validate_output_types` remains a defense-in-depth guard for required output schemas unsupported by MCP tool generation, while sharing the same unscoped-output `work_unit` predicate used by manifest parsing. In fixed-protocol mode, `call_tool` validates artifacts before writing, then writes to the workspace and records in the store. In session mode, the handler also exposes `readiness`, `next-protocol-context`, and `advance`; output tools always derive from the current step, and any declared output type for that step that collides with a reserved driver name is refused before the step is entered.
+`ServerHandler` implementation. `RunaHandler` derives one MCP tool per output artifact type (`produces` + required output choice members + viable `may_produce`) and carries one `OutputArtifactContract` containing the full schema and analyzed ownership through projection and delivery. Runtime-required scope is stripped from the tool and injected; payload-optional scope stays exposed and is shape-validated and authority-checked before complete validation. Fixed and session delivery share preparation and persistence seams, so rejected calls cannot reach workspace or store writes. `validate_protocol_scope` rejects scoped protocols without `--work-unit` and unscoped protocols with one. In session mode, the handler also exposes `readiness`, `next-protocol-context`, and `advance`; output tools always derive from the current step, and any declared output type for that step that collides with a reserved driver name is refused before the step is entered.
 
 ## `.runa/` Directory Layout
 
