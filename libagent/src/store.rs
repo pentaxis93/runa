@@ -2608,6 +2608,7 @@ mod tests {
                 name: produces[0].into(),
             },
             instructions: None,
+            workflow_mechanics: None,
         }
     }
 
