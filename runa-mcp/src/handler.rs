@@ -10,10 +10,8 @@ use serde_json::Value;
 use tracing::{info, warn};
 
 use libagent::context::ContextInjectionView;
-use libagent::validation::validate_artifact;
-use libagent::{
-    ArtifactStore, ArtifactType, ProtocolDeclaration, SessionState, validate_output_scope,
-};
+use libagent::validation::{validate_artifact, validate_artifact_field};
+use libagent::{ArtifactStore, ArtifactType, ProtocolDeclaration, SessionState, WorkUnitOwnership};
 use runa_forge_compose::ForgeRuntime;
 
 use crate::mutation_ledger::{
@@ -29,8 +27,8 @@ pub struct RunaHandler {
     state: Option<Mutex<HandlerState>>,
     workspace_dir: PathBuf,
     tools: Vec<Tool>,
-    /// Maps artifact type name → full JSON Schema (with work_unit intact).
-    tool_schemas: HashMap<String, Value>,
+    /// Maps artifact type name to the single analyzed tool/delivery contract.
+    tool_contracts: HashMap<String, OutputArtifactContract>,
     session: Option<Mutex<SessionState>>,
     forge_runtime: Option<Arc<ForgeRuntime>>,
     /// Per-run forge mutation state for the current protocol step: recorded
@@ -43,6 +41,12 @@ struct HandlerState {
     store: ArtifactStore,
 }
 
+#[derive(Clone)]
+struct OutputArtifactContract {
+    artifact_type: ArtifactType,
+    ownership: WorkUnitOwnership,
+}
+
 impl RunaHandler {
     pub fn new(
         protocol: ProtocolDeclaration,
@@ -51,7 +55,7 @@ impl RunaHandler {
         workspace_dir: PathBuf,
         forge_runtime: Option<ForgeRuntime>,
     ) -> Self {
-        let (tools, tool_schemas) =
+        let (tools, tool_contracts) =
             output_tools_for_protocol(&protocol, work_unit.as_deref(), &store, false);
 
         Self {
@@ -60,7 +64,7 @@ impl RunaHandler {
             state: Some(Mutex::new(HandlerState { store })),
             workspace_dir,
             tools,
-            tool_schemas,
+            tool_contracts,
             session: None,
             forge_runtime: forge_runtime.map(Arc::new),
             ledger: Mutex::new(MutationLedger::default()),
@@ -95,7 +99,7 @@ impl RunaHandler {
             state: None,
             workspace_dir: session.workspace_dir().to_path_buf(),
             tools: Vec::new(),
-            tool_schemas: HashMap::new(),
+            tool_contracts: HashMap::new(),
             session: Some(Mutex::new(session)),
             forge_runtime: forge_runtime.map(Arc::new),
             ledger: Mutex::new(MutationLedger::default()),
@@ -529,9 +533,9 @@ impl RunaHandler {
             return Ok(CallToolResult::error(vec![Content::text(message)]));
         }
 
-        let (_, schemas) = session_tools_and_schemas(&session)
+        let (_, contracts) = session_tools_and_schemas(&session)
             .map_err(|error| McpError::internal_error(error, None))?;
-        let full_schema = schemas
+        let output_contract = contracts
             .get(tool_name)
             .ok_or_else(|| McpError::invalid_params(format!("unknown tool: {tool_name}"), None))?;
         let mut data = match request.arguments {
@@ -542,31 +546,23 @@ impl RunaHandler {
         let instance_id = extract_instance_id(&mut data)?;
         validate_instance_id(&instance_id).map_err(|e| McpError::invalid_params(e, None))?;
 
-        let at = ArtifactType {
-            name: tool_name.to_string(),
-            schema: full_schema.clone(),
-        };
-        if at.schema_mentions_work_unit()
-            && let (Value::Object(data_map), Some(wu)) =
-                (&mut data, current_step.work_unit.as_ref())
-        {
-            data_map.insert("work_unit".to_string(), Value::String(wu.clone()));
-        }
-
-        if let Err(e) = validate_artifact(&data, &at) {
-            let msg = validation_message(e);
+        if let Err(message) = prepare_artifact_delivery(
+            &mut data,
+            output_contract,
+            current_step.work_unit.as_deref(),
+        ) {
             append_tool_event(
                 "tool_result",
                 &protocol_name,
                 current_step.work_unit.as_deref(),
                 tool_name,
                 None,
-                Some(&msg),
+                Some(&message),
             )?;
-            return Ok(CallToolResult::error(vec![Content::text(msg)]));
+            return Ok(CallToolResult::error(vec![Content::text(message)]));
         }
 
-        if schema_declares_handle(full_schema) {
+        if schema_declares_handle(&output_contract.artifact_type.schema) {
             let existing_handle = stored_handle(session.store(), tool_name, &instance_id)?;
             let entry_adoption = session.promised_ticket().is_some();
             let outcome = {
@@ -593,20 +589,14 @@ impl RunaHandler {
             }
         }
 
-        let type_dir = session.workspace_dir().join(tool_name);
-        std::fs::create_dir_all(&type_dir).map_err(|e| {
-            McpError::internal_error(format!("failed to create directory: {e}"), None)
-        })?;
-        let artifact_path = type_dir.join(format!("{instance_id}.json"));
-        let json = serde_json::to_string_pretty(&data)
-            .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
-        std::fs::write(&artifact_path, &json).map_err(|e| {
-            McpError::internal_error(format!("failed to write artifact: {e}"), None)
-        })?;
-        session
-            .store_mut()
-            .record(tool_name, &instance_id, &artifact_path, &data)
-            .map_err(|e| McpError::internal_error(format!("store error: {e}"), None))?;
+        let workspace_dir = session.workspace_dir().to_path_buf();
+        persist_artifact_delivery(
+            &workspace_dir,
+            session.store_mut(),
+            tool_name,
+            &instance_id,
+            &data,
+        )?;
 
         let message = format!("Produced {tool_name}/{instance_id}.json");
         append_tool_event(
@@ -653,6 +643,29 @@ fn stored_handle(
         )
     })?;
     Ok(body.get("handle").cloned())
+}
+
+fn persist_artifact_delivery(
+    workspace_dir: &Path,
+    store: &mut ArtifactStore,
+    artifact_type: &str,
+    instance_id: &str,
+    data: &Value,
+) -> Result<PathBuf, McpError> {
+    let type_dir = workspace_dir.join(artifact_type);
+    std::fs::create_dir_all(&type_dir).map_err(|error| {
+        McpError::internal_error(format!("failed to create directory: {error}"), None)
+    })?;
+    let artifact_path = type_dir.join(format!("{instance_id}.json"));
+    let json = serde_json::to_string_pretty(data)
+        .map_err(|error| McpError::internal_error(format!("serialization error: {error}"), None))?;
+    std::fs::write(&artifact_path, &json).map_err(|error| {
+        McpError::internal_error(format!("failed to write artifact: {error}"), None)
+    })?;
+    store
+        .record(artifact_type, instance_id, &artifact_path, data)
+        .map_err(|error| McpError::internal_error(format!("store error: {error}"), None))?;
+    Ok(artifact_path)
 }
 
 fn write_session_advance_receipt(payload: &libagent::AdvanceOutcome) -> std::io::Result<()> {
@@ -720,14 +733,61 @@ fn validation_message(error: libagent::ValidationError) -> String {
     }
 }
 
+fn validate_optional_work_unit_authority(
+    data: &Value,
+    delegated_work_unit: Option<&str>,
+) -> Result<(), String> {
+    let Some(declared) = data.get("work_unit").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    match delegated_work_unit {
+        Some(delegated) if declared == delegated => Ok(()),
+        Some(delegated) => Err(format!(
+            "work_unit authority mismatch: session delegates '{delegated}' but payload declares \
+             '{declared}'; omit work_unit for cross-cutting output or declare '{delegated}'"
+        )),
+        None => Err(format!(
+            "work_unit authority mismatch: this session delegates no work unit but payload \
+             declares '{declared}'; omit work_unit for cross-cutting output"
+        )),
+    }
+}
+
+fn prepare_artifact_delivery(
+    data: &mut Value,
+    output_contract: &OutputArtifactContract,
+    delegated_work_unit: Option<&str>,
+) -> Result<(), String> {
+    let artifact_type = &output_contract.artifact_type;
+    match output_contract.ownership {
+        WorkUnitOwnership::RuntimeRequired => {
+            if let (Value::Object(data_map), Some(work_unit)) = (&mut *data, delegated_work_unit) {
+                data_map.insert(
+                    "work_unit".to_string(),
+                    Value::String(work_unit.to_string()),
+                );
+            }
+        }
+        WorkUnitOwnership::PayloadOptional => {
+            if data.get("work_unit").is_some() {
+                validate_artifact_field(data, artifact_type, "/work_unit")
+                    .map_err(validation_message)?;
+                validate_optional_work_unit_authority(data, delegated_work_unit)?;
+            }
+        }
+        WorkUnitOwnership::Absent => {}
+    }
+    validate_artifact(data, artifact_type).map_err(validation_message)
+}
+
 fn output_tools_for_protocol(
     protocol: &ProtocolDeclaration,
     work_unit: Option<&str>,
     store: &ArtifactStore,
     reserve_driver_names: bool,
-) -> (Vec<Tool>, HashMap<String, Value>) {
+) -> (Vec<Tool>, HashMap<String, OutputArtifactContract>) {
     let mut tools = Vec::new();
-    let mut tool_schemas = HashMap::new();
+    let mut tool_contracts = HashMap::new();
 
     let output_types: Vec<&String> = protocol
         .produces
@@ -736,7 +796,7 @@ fn output_tools_for_protocol(
         .chain(protocol.may_produce.iter().filter(|type_name| {
             if work_unit.is_none()
                 && let Some(at) = store.artifact_type(type_name)
-                && at.schema_requires_work_unit()
+                && at.work_unit_ownership() == Ok(WorkUnitOwnership::RuntimeRequired)
             {
                 warn!(
                     operation = "tool_generation",
@@ -780,18 +840,41 @@ fn output_tools_for_protocol(
             continue;
         }
 
-        let stripped = strip_work_unit(&at.schema);
-        let schema_obj = add_instance_id(stripped);
+        let ownership = match at.work_unit_ownership() {
+            Ok(ownership) => ownership,
+            Err(error) => {
+                warn!(
+                    operation = "tool_generation",
+                    outcome = "skipped_unresolved_work_unit_ownership",
+                    artifact_type = %type_name,
+                    schema_path = %error.schema_path,
+                    detail = %error.detail,
+                    "skipping artifact type with unresolved work_unit ownership"
+                );
+                continue;
+            }
+        };
+        let projected = match ownership {
+            WorkUnitOwnership::RuntimeRequired => strip_work_unit(&at.schema),
+            WorkUnitOwnership::PayloadOptional | WorkUnitOwnership::Absent => at.schema.clone(),
+        };
+        let schema_obj = add_instance_id(projected);
 
         tools.push(Tool::new(
             (*type_name).clone(),
             format!("Validate and write a {type_name} artifact to the workspace"),
             Arc::new(schema_obj),
         ));
-        tool_schemas.insert((*type_name).clone(), at.schema.clone());
+        tool_contracts.insert(
+            (*type_name).clone(),
+            OutputArtifactContract {
+                artifact_type: at.clone(),
+                ownership,
+            },
+        );
     }
 
-    (tools, tool_schemas)
+    (tools, tool_contracts)
 }
 
 fn driver_tools() -> Vec<Tool> {
@@ -901,7 +984,7 @@ fn validate_session_output_types(
 
 fn session_tools_and_schemas(
     session: &SessionState,
-) -> Result<(Vec<Tool>, HashMap<String, Value>), String> {
+) -> Result<(Vec<Tool>, HashMap<String, OutputArtifactContract>), String> {
     let mut tools = driver_tools();
     let mut schemas = HashMap::new();
     if session.current_step().is_some() {
@@ -958,6 +1041,20 @@ pub fn validate_output_types(
     store: &ArtifactStore,
     _work_unit: Option<&str>,
 ) -> Result<(), String> {
+    let mut ownerships = HashMap::new();
+    for type_name in protocol.output_artifact_types() {
+        let Some(artifact_type) = store.artifact_type(type_name) else {
+            continue;
+        };
+        let ownership = artifact_type.work_unit_ownership().map_err(|error| {
+            format!(
+                "output type '{type_name}': unresolved work_unit ownership at {}: {}",
+                error.schema_path, error.detail
+            )
+        })?;
+        ownerships.insert(type_name.as_str(), ownership);
+    }
+
     for type_name in protocol
         .produces
         .iter()
@@ -968,6 +1065,7 @@ pub fn validate_output_types(
                 "required output type '{type_name}' not found in manifest"
             ));
         };
+        let ownership = ownerships[type_name.as_str()];
         let root_type = at.schema.get("type").and_then(|t| t.as_str());
         if root_type != Some("object") {
             return Err(format!(
@@ -983,9 +1081,12 @@ pub fn validate_output_types(
                  for MCP tool generation"
             ));
         }
-        if let Err(error) = validate_output_scope(protocol, at) {
+        if !protocol.scoped && ownership == WorkUnitOwnership::RuntimeRequired {
             return Err(format!(
-                "{error}; declare 'scoped = true' or remove 'work_unit' from the output schema's required fields"
+                "protocol '{}' is declared unscoped but output artifact type '{}' requires \
+                 'work_unit'; declare 'scoped = true' or remove 'work_unit' from the output \
+                 schema's required fields",
+                protocol.name, at.name
             ));
         }
     }
@@ -1000,6 +1101,7 @@ pub fn validate_output_types(
             let Some(at) = store.artifact_type(type_name) else {
                 return false;
             };
+            let ownership = ownerships[type_name.as_str()];
             let root_type = at.schema.get("type").and_then(|t| t.as_str());
             if root_type != Some("object") {
                 return false;
@@ -1007,7 +1109,7 @@ pub fn validate_output_types(
             if has_composition_keywords(&at.schema) {
                 return false;
             }
-            if validate_output_scope(protocol, at).is_err() {
+            if !protocol.scoped && ownership == WorkUnitOwnership::RuntimeRequired {
                 return false;
             }
             true
@@ -1189,9 +1291,8 @@ impl ServerHandler for RunaHandler {
             return Ok(CallToolResult::error(vec![Content::text(message)]));
         }
 
-        // Look up the full schema for this artifact type.
-        let full_schema = self
-            .tool_schemas
+        let output_contract = self
+            .tool_contracts
             .get(&tool_name)
             .ok_or_else(|| McpError::invalid_params(format!("unknown tool: {tool_name}"), None))?;
 
@@ -1221,42 +1322,21 @@ impl ServerHandler for RunaHandler {
 
         validate_instance_id(&instance_id).map_err(|e| McpError::invalid_params(e, None))?;
 
-        let at = ArtifactType {
-            name: tool_name.to_string(),
-            schema: full_schema.clone(),
-        };
-
-        // Inject delegated work_unit whenever the full schema mentions it.
-        if at.schema_mentions_work_unit()
-            && let (Value::Object(data_map), Some(wu)) = (&mut data, &self.work_unit)
+        if let Err(message) =
+            prepare_artifact_delivery(&mut data, output_contract, self.work_unit.as_deref())
         {
-            data_map.insert("work_unit".to_string(), Value::String(wu.clone()));
-        }
-
-        // Validate against the full schema (including work_unit).
-        if let Err(e) = validate_artifact(&data, &at) {
-            let msg = match e {
-                libagent::ValidationError::InvalidArtifact { violations, .. } => violations
-                    .iter()
-                    .map(|v| format!("{}: {}", v.instance_path, v.description))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-                libagent::ValidationError::InvalidSchema { detail, .. } => {
-                    format!("schema error: {detail}")
-                }
-            };
             append_tool_event(
                 "tool_result",
                 &protocol.name,
                 self.work_unit.as_deref(),
                 &tool_name,
                 None,
-                Some(&msg),
+                Some(&message),
             )?;
-            return Ok(CallToolResult::error(vec![Content::text(msg)]));
+            return Ok(CallToolResult::error(vec![Content::text(message)]));
         }
 
-        if schema_declares_handle(full_schema) {
+        if schema_declares_handle(&output_contract.artifact_type.schema) {
             let existing_handle = {
                 let state = self
                     .state
@@ -1291,29 +1371,19 @@ impl ServerHandler for RunaHandler {
             }
         }
 
-        // Write artifact to workspace.
-        let type_dir = self.workspace_dir.join(&tool_name);
-        std::fs::create_dir_all(&type_dir).map_err(|e| {
-            McpError::internal_error(format!("failed to create directory: {e}"), None)
-        })?;
-        let artifact_path = type_dir.join(format!("{instance_id}.json"));
-        let json = serde_json::to_string_pretty(&data)
-            .map_err(|e| McpError::internal_error(format!("serialization error: {e}"), None))?;
-        std::fs::write(&artifact_path, &json).map_err(|e| {
-            McpError::internal_error(format!("failed to write artifact: {e}"), None)
-        })?;
-
-        // Record in store.
         let mut state = self
             .state
             .as_ref()
             .expect("fixed protocol handler must have state")
             .lock()
             .unwrap();
-        state
-            .store
-            .record(&tool_name, &instance_id, &artifact_path, &data)
-            .map_err(|e| McpError::internal_error(format!("store error: {e}"), None))?;
+        persist_artifact_delivery(
+            &self.workspace_dir,
+            &mut state.store,
+            &tool_name,
+            &instance_id,
+            &data,
+        )?;
 
         info!(
             operation = "tool_call",
@@ -1509,13 +1579,13 @@ mod tests {
         assert_eq!(handler.tools.len(), 1);
         assert_eq!(handler.tools[0].name.as_ref(), "implementation");
 
-        // The tool schema should not have work_unit but should have instance_id.
+        // Optional work_unit remains payload-owned; instance_id is added.
         let tool_props = handler.tools[0]
             .input_schema
             .get("properties")
             .and_then(|v| v.as_object())
             .expect("tool should have properties");
-        assert!(!tool_props.contains_key("work_unit"));
+        assert!(tool_props.contains_key("work_unit"));
         assert!(tool_props.contains_key("instance_id"));
         assert!(tool_props.contains_key("title"));
 
@@ -1828,6 +1898,86 @@ mod tests {
         let result = validate_output_types(&protocol, &store, Some("wu"));
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("composition keywords"));
+    }
+
+    #[test]
+    fn validate_output_types_reports_ambiguous_work_unit_ownership_before_projection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let types = vec![ArtifactType {
+            name: "ambiguous".into(),
+            schema: json!({
+                "type": "object",
+                "anyOf": [
+                    { "type": "object" },
+                    {
+                        "type": "object",
+                        "properties": { "work_unit": { "type": "string" } }
+                    }
+                ]
+            }),
+        }];
+        let store = ArtifactStore::new(types, tmp.path().join("store")).unwrap();
+        let protocol = ProtocolDeclaration {
+            name: "ambiguous-output".into(),
+            requires: Vec::new(),
+            accepts: Vec::new(),
+            produces: vec!["ambiguous".into()],
+            may_produce: Vec::new(),
+            required_output_choices: Vec::new(),
+            scoped: true,
+            trigger: TriggerCondition::OnChange {
+                name: "unused".into(),
+            },
+            instructions: None,
+            workflow_mechanics: None,
+        };
+
+        let error = validate_output_types(&protocol, &store, Some("work-unit-a")).unwrap_err();
+        assert!(error.contains("/anyOf"), "{error}");
+        assert!(error.contains("disagree"), "{error}");
+    }
+
+    #[test]
+    fn validate_output_types_reports_ambiguous_optional_output_even_with_valid_required_output() {
+        let tmp = tempfile::tempdir().unwrap();
+        let types = vec![
+            ArtifactType {
+                name: "required-output".into(),
+                schema: json!({ "type": "object" }),
+            },
+            ArtifactType {
+                name: "ambiguous-audit".into(),
+                schema: json!({
+                    "type": "object",
+                    "anyOf": [
+                        { "type": "object" },
+                        {
+                            "type": "object",
+                            "properties": { "work_unit": { "type": "string" } }
+                        }
+                    ]
+                }),
+            },
+        ];
+        let store = ArtifactStore::new(types, tmp.path().join("store")).unwrap();
+        let protocol = ProtocolDeclaration {
+            name: "deliver".into(),
+            requires: Vec::new(),
+            accepts: Vec::new(),
+            produces: vec!["required-output".into()],
+            may_produce: vec!["ambiguous-audit".into()],
+            required_output_choices: Vec::new(),
+            scoped: true,
+            trigger: TriggerCondition::OnChange {
+                name: "unused".into(),
+            },
+            instructions: None,
+            workflow_mechanics: None,
+        };
+
+        let error = validate_output_types(&protocol, &store, Some("work-unit-a")).unwrap_err();
+        assert!(error.contains("ambiguous-audit"), "{error}");
+        assert!(error.contains("/anyOf"), "{error}");
     }
 
     #[test]

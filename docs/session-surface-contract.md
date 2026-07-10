@@ -76,6 +76,18 @@ The inner stages, each performed during the outer operation:
 | output recording | Accept an output artifact only through the protocol's declared output contract. Runa validates the artifact against the methodology schema, applies scoped session metadata where the runtime owns it, rejects invalid output, and records only valid output as runtime state. Reached through the methodology's own output tool, not a runa verb. |
 | postcondition-gated commit (advance) | Enforce the completed protocol's postconditions, then re-evaluate lifecycle progress from validated artifact state and commit the transition, following the methodology dependency graph, trigger rules, preconditions, postconditions, and required disposition artifacts. It is not a separate approval operation. |
 
+Output scoping follows effective schema requiredness. Required `work_unit` is
+runtime-owned: the output tool does not expose it, and the session injects its
+delegated canonical value. Optional `work_unit` is artifact-payload-owned: the
+tool exposes it as optional, omission stays cross-cutting, and an explicit own
+scope persists exactly. A malformed declaration fails schema-shape validation;
+a well-formed foreign declaration fails authority validation and is never
+rewritten. Both failures occur before workspace or store persistence. Ambiguous
+schema ownership fails closed with a schema-location diagnostic.
+Conditionals, dependencies, and negation elsewhere in the artifact schema are
+irrelevant to this decision; they fail closed only when their root-object
+assertion can require, admit, or constrain `work_unit`.
+
 Every stage that reconciles the workspace re-establishes the session's scoped
 work-unit identity before evaluating readiness, serving context, or advancing
 lifecycle state. Current-step readiness reconfirmation applies when the cascade

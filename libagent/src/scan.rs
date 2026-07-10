@@ -1078,6 +1078,9 @@ mod tests {
             )
             .unwrap();
         assert_eq!(store.get("report", "item").unwrap().work_unit, None);
+        let artifact_bytes = std::fs::read(&artifact_path).unwrap();
+        let store_path = tmp.path().join("store/report/item.json");
+        let store_bytes = std::fs::read(&store_path).unwrap();
 
         let result = scan(&workspace, &mut store).unwrap();
 
@@ -1087,6 +1090,8 @@ mod tests {
         assert!(result.revalidated.is_empty());
         assert_eq!(store.get("report", "item").unwrap().work_unit, None);
         assert_eq!(store.get("report", "item").unwrap().last_modified_ms, 1234);
+        assert_eq!(std::fs::read(&artifact_path).unwrap(), artifact_bytes);
+        assert_eq!(std::fs::read(&store_path).unwrap(), store_bytes);
     }
 
     #[test]
@@ -1110,6 +1115,9 @@ mod tests {
             store.get("report", "item").unwrap().work_unit,
             Some("wu-1".to_string())
         );
+        let artifact_bytes = std::fs::read(&artifact_path).unwrap();
+        let store_path = tmp.path().join("store/report/item.json");
+        let store_bytes = std::fs::read(&store_path).unwrap();
 
         let result = scan(&workspace, &mut store).unwrap();
 
@@ -1118,6 +1126,8 @@ mod tests {
         assert!(result.modified.is_empty());
         assert!(result.revalidated.is_empty());
         assert_eq!(store.get("report", "item").unwrap().last_modified_ms, 1234);
+        assert_eq!(std::fs::read(&artifact_path).unwrap(), artifact_bytes);
+        assert_eq!(std::fs::read(&store_path).unwrap(), store_bytes);
     }
 
     // --- Malformed work_unit preservation ---

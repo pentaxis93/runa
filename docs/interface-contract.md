@@ -45,7 +45,7 @@ A protocol declaration:
 - **may_produce** — zero or more artifact type names. Absent optional outputs do not fail postconditions, but they also do not create completion evidence. If output should always be produced, the artifact type belongs in `produces`.
 - **required_output_choices** — zero or more tables with `name` and `members`. Each group name must be unique within the protocol. Each group must list at least two registered artifact type names. Members must not repeat and must not overlap with the protocol's `produces`, `may_produce`, or another required output choice member.
 - **scoped** — optional boolean, default `false`. When `false`, the protocol participates only in unscoped evaluation. When `true`, the protocol participates only in caller-scoped evaluation for an explicit work unit supplied by the orchestrator.
-- Output schema consistency is part of manifest validity for unscoped protocols. Unscoped protocols (`scoped = false` or omitted) must not declare output schemas in `produces`, `may_produce`, or `required_output_choices` members whose top-level `required` array includes `work_unit`.
+- Output schema consistency is part of manifest validity for unscoped protocols. Unscoped protocols (`scoped = false` or omitted) must not declare output schemas in `produces`, `may_produce`, or `required_output_choices` members whose effective schema requires `work_unit`.
 - Freshness suppression uses successful execution records when available. After a protocol finishes with passing postconditions, runa records the freshness-relevant input set it processed for that `(protocol, work_unit)` pair. Those execution-record snapshots are mode-aware: `on_change` and `on_invalid` preserve any recorded matching instance, while `on_artifact` and `requires` compare only valid instances. Later evaluations suppress reruns only when the current mode-appropriate input set matches that execution record. If no execution record exists, runa falls back to output artifact timestamps, which still compare relevant inputs by latest recorded modification time. `produces` and the exactly one selected member of each `required_output_choices` group create completion evidence; `may_produce` does not.
 - **trigger** — one trigger condition (see below)
 
@@ -168,6 +168,24 @@ Given the declarations above, runa provides six runtime capabilities:
 
 **Validation.** When an artifact is produced, runa validates it against its declared schema. A protocol's execution is not complete until its `produces` artifacts exist and validate and each `required_output_choices` group has exactly one valid produced member. `may_produce` artifacts are validated if present but not required.
 
+**Output scope ownership.** Effective schema requiredness is the sole ownership
+rule for an output artifact's `work_unit`. A required field is runtime-owned:
+runa withholds it from agent input and injects the delegated canonical work
+unit. An optional field is payload-owned: omission remains omission and means
+cross-cutting, while an explicit value is preserved only when it equals the
+delegated work unit. Malformed values fail field-shape validation before the
+authority check; well-formed foreign values fail authority; complete artifact
+validation follows. Nothing is persisted until all checks pass. A schema whose
+ownership cannot be resolved safely through the supported local-reference and
+composition forms is rejected with a schema-location diagnostic.
+Unsupported conditional, dependency, and negation forms participate only when
+they can affect the root `work_unit`; unrelated uses do not change ownership.
+For example, the runtime reports:
+
+```text
+protocol 'publish' output artifact type 'report' has unresolved work_unit ownership at /not/properties/work_unit: 'not' can change work_unit ownership, admissibility, or constraints
+```
+
 **Graph computation.** runa computes the dependency graph from protocol declarations. This enables: freshness analysis (which artifacts are stale), execution ordering (what can run now), cycle detection (where the methodology creates loops), and blocked-protocol identification (what's waiting on what).
 
 **Enforcement.** A protocol cannot execute if any `requires` artifact type lacks a valid instance. A protocol's execution is incomplete if its `produces` artifacts are missing or invalid, or if a required output choice has zero or multiple produced member types. These are hard constraints the runtime enforces regardless of what the methodology intends.
@@ -195,7 +213,7 @@ The interface contract defines conventional locations for methodology content re
 
 These conventions are part of the interface contract — the same layer that defines manifest format, field names, and trigger condition types. A valid methodology conforms to this layout. runa derives paths from names it already has; the manifest does not include explicit path fields.
 
-Both schema files and instruction files must exist at their conventional locations when the manifest is parsed. Missing files are parse errors, caught before any runtime operation. Schema files are read and parsed at parse time. Instruction files are also read at parse time and stored on the resolved protocol declarations. Resolved manifests also enforce the unscoped-output rule for declared outputs, rejecting unscoped protocols whose `produces`, `may_produce`, or required output choice member schemas require `work_unit`.
+Both schema files and instruction files must exist at their conventional locations when the manifest is parsed. Missing files are parse errors, caught before any runtime operation. Schema files are read and parsed at parse time. Instruction files are also read at parse time and stored on the resolved protocol declarations. Resolved manifests also enforce the unscoped-output rule for declared outputs, rejecting unscoped protocols whose `produces`, `may_produce`, or required output choice member schemas effectively require `work_unit`.
 Unsafe artifact type or protocol names are also parse errors, rejected before runa attempts any layout-derived filesystem lookup.
 
 ## Methodology Registration

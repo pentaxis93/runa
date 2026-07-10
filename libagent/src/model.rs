@@ -7,6 +7,8 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+use crate::schema_scope::{WorkUnitOwnership, analyze_work_unit_ownership};
+
 /// A methodology's complete registration with the runa runtime.
 ///
 /// The manifest is the methodology's only interface with the runtime.
@@ -41,27 +43,11 @@ pub struct ArtifactType {
 }
 
 impl ArtifactType {
-    /// True when the schema's top-level `required` array includes `work_unit`.
-    pub fn schema_requires_work_unit(&self) -> bool {
-        self.schema
-            .get("required")
-            .and_then(|required| required.as_array())
-            .is_some_and(|required| {
-                required
-                    .iter()
-                    .any(|value| value.as_str() == Some("work_unit"))
-            })
-    }
-
-    /// True when the schema mentions `work_unit` at the top level, either as a
-    /// required field or as a declared property.
-    pub fn schema_mentions_work_unit(&self) -> bool {
-        self.schema_requires_work_unit()
-            || self
-                .schema
-                .get("properties")
-                .and_then(|properties| properties.as_object())
-                .is_some_and(|properties| properties.contains_key("work_unit"))
+    /// Determine whether `work_unit` is runtime-owned, payload-owned, or absent.
+    pub fn work_unit_ownership(
+        &self,
+    ) -> Result<WorkUnitOwnership, crate::schema_scope::WorkUnitSchemaError> {
+        analyze_work_unit_ownership(&self.schema)
     }
 }
 
@@ -70,10 +56,19 @@ impl ArtifactType {
 pub struct UnscopedOutputRequiresWorkUnitError {
     pub protocol: String,
     pub artifact_type: String,
+    pub schema_path: Option<String>,
+    pub detail: Option<String>,
 }
 
 impl fmt::Display for UnscopedOutputRequiresWorkUnitError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let (Some(schema_path), Some(detail)) = (&self.schema_path, &self.detail) {
+            return write!(
+                f,
+                "output artifact type '{}' has unresolved work_unit ownership at {}: {}",
+                self.artifact_type, schema_path, detail
+            );
+        }
         write!(
             f,
             "protocol '{}' is declared unscoped but output artifact type '{}' requires 'work_unit'",
@@ -90,10 +85,20 @@ pub fn validate_output_scope(
     protocol: &ProtocolDeclaration,
     artifact_type: &ArtifactType,
 ) -> Result<(), UnscopedOutputRequiresWorkUnitError> {
-    if !protocol.scoped && artifact_type.schema_requires_work_unit() {
+    let ownership = artifact_type.work_unit_ownership().map_err(|error| {
+        UnscopedOutputRequiresWorkUnitError {
+            protocol: protocol.name.clone(),
+            artifact_type: artifact_type.name.clone(),
+            schema_path: Some(error.schema_path),
+            detail: Some(error.detail),
+        }
+    })?;
+    if !protocol.scoped && ownership == WorkUnitOwnership::RuntimeRequired {
         return Err(UnscopedOutputRequiresWorkUnitError {
             protocol: protocol.name.clone(),
             artifact_type: artifact_type.name.clone(),
+            schema_path: None,
+            detail: None,
         });
     }
 
@@ -484,7 +489,40 @@ mod tests {
     }
 
     #[test]
-    fn schema_mentions_work_unit_when_optional_property_is_declared() {
+    fn validate_output_scope_rejects_work_unit_required_through_local_ref() {
+        let protocol = ProtocolDeclaration {
+            name: "summarize".into(),
+            requires: vec![],
+            accepts: vec![],
+            produces: vec!["summary".into()],
+            may_produce: vec![],
+            required_output_choices: Vec::new(),
+            scoped: false,
+            trigger: TriggerCondition::OnArtifact {
+                name: "draft".into(),
+            },
+            instructions: None,
+            workflow_mechanics: None,
+        };
+        let artifact_type = ArtifactType {
+            name: "summary".into(),
+            schema: serde_json::json!({
+                "$defs": {
+                    "scoped": {
+                        "type": "object",
+                        "properties": { "work_unit": { "type": "string" } },
+                        "required": ["work_unit"]
+                    }
+                },
+                "$ref": "#/$defs/scoped"
+            }),
+        };
+
+        assert!(validate_output_scope(&protocol, &artifact_type).is_err());
+    }
+
+    #[test]
+    fn schema_classifies_optional_work_unit_as_payload_owned() {
         let artifact_type = ArtifactType {
             name: "summary".into(),
             schema: serde_json::json!({
@@ -497,12 +535,14 @@ mod tests {
             }),
         };
 
-        assert!(artifact_type.schema_mentions_work_unit());
-        assert!(!artifact_type.schema_requires_work_unit());
+        assert_eq!(
+            artifact_type.work_unit_ownership().unwrap(),
+            WorkUnitOwnership::PayloadOptional
+        );
     }
 
     #[test]
-    fn schema_mentions_work_unit_when_required_without_declared_property() {
+    fn schema_classifies_required_work_unit_as_runtime_owned() {
         let artifact_type = ArtifactType {
             name: "implementation".into(),
             schema: serde_json::json!({
@@ -511,7 +551,9 @@ mod tests {
             }),
         };
 
-        assert!(artifact_type.schema_mentions_work_unit());
-        assert!(artifact_type.schema_requires_work_unit());
+        assert_eq!(
+            artifact_type.work_unit_ownership().unwrap(),
+            WorkUnitOwnership::RuntimeRequired
+        );
     }
 }

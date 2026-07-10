@@ -105,6 +105,45 @@ pub fn validate_artifact(
     }
 }
 
+/// Validate only violations rooted at one instance JSON Pointer.
+///
+/// The validator is still compiled from the complete artifact schema so local
+/// references and surrounding schema context retain their normal meaning.
+pub fn validate_artifact_field(
+    artifact_data: &Value,
+    artifact_type: &ArtifactType,
+    instance_pointer: &str,
+) -> Result<(), ValidationError> {
+    let validator = jsonschema::validator_for(&artifact_type.schema).map_err(|e| {
+        ValidationError::InvalidSchema {
+            artifact_type: artifact_type.name.clone(),
+            detail: e.to_string(),
+        }
+    })?;
+    let nested_prefix = format!("{instance_pointer}/");
+    let violations: Vec<Violation> = validator
+        .iter_errors(artifact_data)
+        .filter(|error| {
+            let path = error.instance_path().to_string();
+            path == instance_pointer || path.starts_with(&nested_prefix)
+        })
+        .map(|e| Violation {
+            artifact_type: artifact_type.name.clone(),
+            description: e.to_string(),
+            schema_path: e.schema_path().to_string(),
+            instance_path: e.instance_path().to_string(),
+        })
+        .collect();
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(ValidationError::InvalidArtifact {
+            artifact_type: artifact_type.name.clone(),
+            violations,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,6 +154,48 @@ mod tests {
             name: name.into(),
             schema,
         }
+    }
+
+    #[test]
+    fn field_validation_reports_only_the_selected_instance_path() {
+        let at = make_artifact_type(
+            "research-record",
+            json!({
+                "type": "object",
+                "required": ["title"],
+                "properties": {
+                    "title": { "type": "string" },
+                    "work_unit": { "type": "string", "pattern": "^[a-z-]+$" }
+                }
+            }),
+        );
+        let data = json!({ "work_unit": "Bad/Scope" });
+
+        let error = validate_artifact_field(&data, &at, "/work_unit").unwrap_err();
+        let ValidationError::InvalidArtifact { violations, .. } = error else {
+            panic!("expected artifact violations");
+        };
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].instance_path, "/work_unit");
+    }
+
+    #[test]
+    fn field_validation_defers_unrelated_complete_artifact_violations() {
+        let at = make_artifact_type(
+            "research-record",
+            json!({
+                "type": "object",
+                "required": ["title"],
+                "properties": {
+                    "title": { "type": "string" },
+                    "work_unit": { "type": "string" }
+                }
+            }),
+        );
+        let data = json!({ "work_unit": "work-unit-a" });
+
+        assert!(validate_artifact_field(&data, &at, "/work_unit").is_ok());
+        assert!(validate_artifact(&data, &at).is_err());
     }
 
     #[test]

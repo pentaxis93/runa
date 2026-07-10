@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/tesserine/groundwork/main/schemas/test-evidence.schema.json",
+  "title": "Test Evidence",
+  "description": "Validates the content of a test-evidence artifact. Records per-cycle check results against contract criteria, keyed by contract criterion id.",
+  "type": "object",
+  "required": ["work_unit", "evidence"],
+  "additionalProperties": false,
+  "properties": {
+    "work_unit": {
+      "type": "string",
+      "description": "Common envelope — threads to work unit.",
+      "pattern": "^[a-z][a-z0-9]*([-.][a-z0-9]+)*$"
+    },
+    "evidence": {
+      "type": "array",
+      "description": "Check result entries, each referencing a contract criterion by id.",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "description": "A single check result for a contract criterion.",
+        "required": ["criterion_id", "result", "command", "output_summary"],
+        "additionalProperties": false,
+        "properties": {
+          "criterion_id": {
+            "type": "string",
+            "description": "Criterion id from the contract artifact.",
+            "pattern": "^[a-z][a-z0-9]*([-.][a-z0-9]+)*$"
+          },
+          "result": {
+            "type": "string",
+            "description": "Check outcome.",
+            "enum": ["pass", "fail"]
+          },
+          "command": {
+            "type": "string",
+            "description": "The command that was executed.",
+            "minLength": 1
+          },
+          "output_summary": {
+            "type": "string",
+            "description": "Summary of the command output — proof the check ran.",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  }
+}

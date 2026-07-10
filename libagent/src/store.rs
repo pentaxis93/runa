@@ -1548,6 +1548,8 @@ mod tests {
             assert_eq!(record.inputs, snapshot);
         }
 
+        let execution_record_path = store_dir.join("execution-records.json");
+        let historical_bytes = std::fs::read(&execution_record_path).unwrap();
         let mut reloaded = make_store(&store_dir, vec!["request"]);
         reloaded
             .sync_execution_contract_hash(Some("contract-v1".to_string()))
@@ -1563,6 +1565,11 @@ mod tests {
                 instance_id: "alpha".to_string(),
                 content_hash: content_hash(&json!({"title": "A", "work_unit": "wu-a"})),
             }]
+        );
+        assert_eq!(
+            std::fs::read(&execution_record_path).unwrap(),
+            historical_bytes,
+            "loading and matching-contract reconciliation must not rewrite execution history"
         );
     }
 

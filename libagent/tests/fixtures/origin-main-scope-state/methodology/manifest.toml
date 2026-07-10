@@ -1,0 +1,24 @@
+name = "historical-scope-fixture"
+
+[[artifact_types]]
+name = "request"
+
+[[artifact_types]]
+name = "required-record"
+
+[[artifact_types]]
+name = "cross-record"
+
+[[artifact_types]]
+name = "invalid-record"
+
+[[artifact_types]]
+name = "result"
+
+[[protocols]]
+name = "consume"
+requires = ["request"]
+accepts = ["required-record", "cross-record", "invalid-record"]
+produces = ["result"]
+scoped = true
+trigger = { type = "on_artifact", name = "request" }
