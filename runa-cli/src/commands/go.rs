@@ -219,14 +219,29 @@ fn run_ticket_resolved(
     loaded: crate::project::LoadedProject,
     scan_result: libagent::ScanResult,
 ) -> Result<StepOutcome, StepError> {
-    // Re-entry (the work-unit already exists) degrades to a bound session and
-    // needs no acquisition surface — resolve before discovering it.
+    // Re-entry (the work-unit already exists) degrades to a bound session only
+    // when the acquisition surface's persisted execution record is current; a
+    // stale or absent record routes the entry through the acquisition surface
+    // below, so the methodology's re-grounding discipline fires before the
+    // scoped pipeline proceeds. A methodology with no acquisition surface has
+    // no re-grounding to serve, so its re-entry stays bound. Resolution runs
+    // first and stays fail-closed.
     if let Some(work_unit) = entry::resolve_existing(&loaded, &identity, &ticket_ref)? {
+        let record_current = match entry::acquisition_surface(&loaded) {
+            Ok(acquisition) => libagent::acquisition_record_current(&acquisition, &loaded.store),
+            Err(_) => true,
+        };
+        if record_current {
+            println!(
+                "Ticket {} resolves to recorded work-unit {work_unit}",
+                ticket_ref.display
+            );
+            return run_bound(working_dir, config_override, &work_unit);
+        }
         println!(
-            "Ticket {} resolves to recorded work-unit {work_unit}",
+            "Ticket {} resolves to recorded work-unit {work_unit}; serving the acquisition surface to re-ground it",
             ticket_ref.display
         );
-        return run_bound(working_dir, config_override, &work_unit);
     }
 
     let acquisition = entry::acquisition_surface(&loaded)?;

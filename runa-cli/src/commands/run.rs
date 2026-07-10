@@ -541,22 +541,34 @@ fn run_resolved_entry(
     cli_agent_command_present: bool,
     cli_agent_command_argv: &[String],
 ) -> Result<RunOutcome, RunError> {
-    // Re-entry: the work-unit already exists — behave as `--work-unit <id>`.
+    // Re-entry: the work-unit already exists — behave as `--work-unit <id>`
+    // only when the acquisition surface's persisted execution record is
+    // current; a stale or absent record routes the entry through the
+    // acquisition path below, so the methodology's re-grounding discipline
+    // fires before the scoped pipeline proceeds. A methodology with no
+    // acquisition surface has no re-grounding to serve, so its re-entry stays
+    // bound. Resolution runs first and stays fail-closed.
     if let Some(work_unit) =
         entry::resolve_existing(&loaded, &identity, &ticket_ref).map_err(RunError::from)?
     {
-        return run_with_scope(
-            working_dir,
-            config_override,
-            dry_run,
-            json_output,
-            loaded,
-            scan_result,
-            Some(work_unit),
-            false,
-            cli_agent_command_present,
-            cli_agent_command_argv,
-        );
+        let record_current = match entry::acquisition_surface(&loaded) {
+            Ok(acquisition) => libagent::acquisition_record_current(&acquisition, &loaded.store),
+            Err(_) => true,
+        };
+        if record_current {
+            return run_with_scope(
+                working_dir,
+                config_override,
+                dry_run,
+                json_output,
+                loaded,
+                scan_result,
+                Some(work_unit),
+                false,
+                cli_agent_command_present,
+                cli_agent_command_argv,
+            );
+        }
     }
 
     // Cold: project the entry cascade, or execute acquisition then cascade.
