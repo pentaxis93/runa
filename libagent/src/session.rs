@@ -1338,6 +1338,81 @@ trigger = { type = "on_artifact", name = "work-unit" }
         assert!(session.store().execution_record("survey", None).is_some());
     }
 
+    /// AC4 of tesserine/runa#248 at the session layer: after a supersession,
+    /// the ordinary session surface serves the superseded protocol as the
+    /// current step, and its `advance` records the regenerated execution,
+    /// resolving the pending supersession.
+    #[test]
+    fn session_serves_and_records_the_superseded_step() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_dir = write_unscoped_session_project(dir.path());
+
+        // First pass: the session executes survey and records it — the
+        // pipeline is then suppressed as outputs-current.
+        let mut session = SessionState::open(project_dir.clone(), None, None).unwrap();
+        let workspace = project_dir.join(".runa/workspace");
+        fs::create_dir_all(workspace.join("requirements")).unwrap();
+        fs::write(
+            workspace.join("requirements/requirements-1.json"),
+            r#"{"scope":"v1","functional_requirements":["defective"]}"#,
+        )
+        .unwrap();
+        session.advance_with_validator(|_, _| Ok(())).unwrap();
+        drop(session);
+        let suppressed = SessionState::open(project_dir.clone(), None, None).unwrap();
+        assert!(suppressed.current_step().is_none());
+        drop(suppressed);
+
+        // Governance supersedes the recorded execution, targeting the exact
+        // current revision, through the store the session persists into.
+        let mut loaded = crate::project::load(&project_dir, None).unwrap();
+        crate::scan(&loaded.workspace_dir, &mut loaded.store).unwrap();
+        let survey = loaded
+            .manifest
+            .protocols
+            .iter()
+            .find(|protocol| protocol.name == "survey")
+            .cloned()
+            .unwrap();
+        let rejected_hash = loaded
+            .store
+            .instances_of("requirements", None)
+            .into_iter()
+            .find(|(id, _)| *id == "requirements-1")
+            .map(|(_, state)| state.content_hash.clone())
+            .unwrap();
+        loaded
+            .store
+            .supersede_execution(
+                &survey,
+                None,
+                &[(
+                    "requirements".to_string(),
+                    "requirements-1".to_string(),
+                    rejected_hash,
+                )],
+                "governance judged the conforming requirements defective",
+            )
+            .unwrap();
+        drop(loaded);
+
+        // The normal session path serves the superseded step again and its
+        // advance records the regenerated execution.
+        let mut session = SessionState::open(project_dir.clone(), None, None).unwrap();
+        let step = session.current_step().expect("superseded step is served");
+        assert_eq!(step.protocol, "survey");
+        fs::write(
+            workspace.join("requirements/requirements-1.json"),
+            r#"{"scope":"v2","functional_requirements":["corrected"]}"#,
+        )
+        .unwrap();
+        let advance = session.advance_with_validator(|_, _| Ok(())).unwrap();
+        assert_eq!(advance.payload.completed_step.protocol, "survey");
+        assert!(session.store().execution_record("survey", None).is_some());
+        assert!(!session.store().pending_supersession("survey", None));
+        assert_eq!(session.store().supersessions().len(), 1);
+    }
+
     #[test]
     fn open_entry_re_entry_binds_without_acquisition_surface() {
         let _env = unset_forge_env();
