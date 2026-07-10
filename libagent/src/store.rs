@@ -24,6 +24,7 @@ pub struct ArtifactStore {
     artifact_types: HashMap<String, ArtifactType>,
     artifacts: HashMap<(String, String), ArtifactState>,
     execution_records: HashMap<(String, Option<String>), ExecutionRecord>,
+    supersessions: Vec<SupersededExecution>,
     execution_contract_hash: Option<String>,
     store_dir: PathBuf,
     // Populated by scan() for the current process only. These observations are
@@ -78,6 +79,156 @@ pub struct ExecutionRecord {
     #[serde(default)]
     pub input_modes: BTreeMap<String, ExecutionInputMode>,
     pub inputs: ExecutionInputSnapshot,
+}
+
+/// One output revision rejected by a supersession disposition. Carries the
+/// exact identity (`artifact_type`, `instance_id`, `content_hash`) the
+/// disposition targeted, plus the rejected artifact content itself so the
+/// revision stays inspectable after regeneration overwrites the workspace
+/// instance.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RejectedOutput {
+    pub artifact_type: String,
+    pub instance_id: String,
+    pub content_hash: String,
+    pub content: Value,
+}
+
+/// A superseded protocol execution retained as lineage. Created by
+/// [`ArtifactStore::supersede_execution`]: the disposition's target, its
+/// auditable reason, the output revisions it rejected, and the execution
+/// record it displaced.
+///
+/// A supersession is **pending** while its `(protocol, work_unit)` pair has
+/// no current execution record — pendingness is computed from that relation,
+/// never stored. Recording a new execution for the pair (through any
+/// recording path, including the session surface's staged commit) resolves
+/// the pending state; the entry itself is append-only lineage.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SupersededExecution {
+    pub protocol: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_unit: Option<String>,
+    pub reason: String,
+    pub rejected_outputs: Vec<RejectedOutput>,
+    pub superseded_record: ExecutionRecord,
+}
+
+/// Rejections of a supersession disposition, each naming the exact mismatch
+/// between the disposition and current reality.
+#[derive(Debug)]
+pub enum SupersedeError {
+    /// The disposition names no rejected output.
+    EmptyOutputs,
+    /// The disposition carries no reason; the judgment must be auditable.
+    EmptyReason,
+    /// No execution record exists for the targeted `(protocol, work_unit)`.
+    NoExecutionRecord {
+        protocol: String,
+        work_unit: Option<String>,
+    },
+    /// The named artifact type is not an output the protocol declares.
+    UndeclaredOutputType {
+        protocol: String,
+        artifact_type: String,
+    },
+    /// The named instance is not recorded for the targeted scope.
+    UnknownInstance {
+        artifact_type: String,
+        instance_id: String,
+        work_unit: Option<String>,
+    },
+    /// The supplied revision does not match the instance's current content.
+    StaleRevision {
+        artifact_type: String,
+        instance_id: String,
+        supplied: String,
+        current: String,
+    },
+    /// The rejected artifact's workspace file could not be read for
+    /// preservation as lineage evidence.
+    UnreadableArtifact {
+        artifact_type: String,
+        instance_id: String,
+        path: PathBuf,
+        detail: String,
+    },
+    /// The underlying store operation failed.
+    Store(StoreError),
+}
+
+impl fmt::Display for SupersedeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fn scope(work_unit: &Option<String>) -> String {
+            match work_unit {
+                Some(id) => format!(" (work unit '{id}')"),
+                None => String::new(),
+            }
+        }
+        match self {
+            SupersedeError::EmptyOutputs => {
+                write!(f, "a supersession must name at least one rejected output")
+            }
+            SupersedeError::EmptyReason => {
+                write!(f, "a supersession must carry a non-empty reason")
+            }
+            SupersedeError::NoExecutionRecord {
+                protocol,
+                work_unit,
+            } => write!(
+                f,
+                "no recorded execution exists for protocol '{protocol}'{}",
+                scope(work_unit)
+            ),
+            SupersedeError::UndeclaredOutputType {
+                protocol,
+                artifact_type,
+            } => write!(
+                f,
+                "protocol '{protocol}' does not declare output artifact type '{artifact_type}'"
+            ),
+            SupersedeError::UnknownInstance {
+                artifact_type,
+                instance_id,
+                work_unit,
+            } => write!(
+                f,
+                "no recorded instance '{artifact_type}/{instance_id}'{}",
+                scope(work_unit)
+            ),
+            SupersedeError::StaleRevision {
+                artifact_type,
+                instance_id,
+                supplied,
+                current,
+            } => write!(
+                f,
+                "revision '{supplied}' is not the current revision of \
+                 '{artifact_type}/{instance_id}'; the current revision is '{current}'"
+            ),
+            SupersedeError::UnreadableArtifact {
+                artifact_type,
+                instance_id,
+                path,
+                detail,
+            } => write!(
+                f,
+                "cannot preserve rejected artifact '{artifact_type}/{instance_id}' \
+                 from '{}': {detail}",
+                path.display()
+            ),
+            SupersedeError::Store(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl std::error::Error for SupersedeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            SupersedeError::Store(err) => Some(err),
+            _ => None,
+        }
+    }
 }
 
 /// Validation status of an artifact instance.
@@ -202,12 +353,14 @@ struct PersistedArtifactState {
     work_unit: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct PersistedExecutionRecords {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     contract_hash: Option<String>,
     #[serde(default)]
     records: Vec<PersistedExecutionRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    supersessions: Vec<SupersededExecution>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -353,7 +506,7 @@ fn serialize_artifact_state(state: &ArtifactState) -> Result<String, StoreError>
 
 fn deserialize_execution_records(
     content: &str,
-) -> Result<(Option<String>, ExecutionRecordMap), StoreError> {
+) -> Result<(Option<String>, ExecutionRecordMap, Vec<SupersededExecution>), StoreError> {
     let persisted: PersistedExecutionRecords =
         serde_json::from_str(content).map_err(|e| StoreError::Serialization(e.to_string()))?;
     let records = persisted
@@ -373,12 +526,13 @@ fn deserialize_execution_records(
             ))
         })
         .collect();
-    Ok((persisted.contract_hash, records))
+    Ok((persisted.contract_hash, records, persisted.supersessions))
 }
 
 fn serialize_execution_records(
     contract_hash: Option<&str>,
     records: &ExecutionRecordMap,
+    supersessions: &[SupersededExecution],
 ) -> Result<String, StoreError> {
     let mut persisted_records: Vec<_> = records
         .iter()
@@ -397,6 +551,7 @@ fn serialize_execution_records(
     serde_json::to_string_pretty(&PersistedExecutionRecords {
         contract_hash: contract_hash.map(str::to_owned),
         records: persisted_records,
+        supersessions: supersessions.to_vec(),
     })
     .map_err(|e| StoreError::Serialization(e.to_string()))
 }
@@ -473,10 +628,12 @@ impl ArtifactStore {
         }
 
         let execution_records_path = store_dir.join("execution-records.json");
-        let (execution_contract_hash, execution_records) =
+        let (execution_contract_hash, execution_records, supersessions) =
             match std::fs::read_to_string(&execution_records_path) {
                 Ok(content) => deserialize_execution_records(&content)?,
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => (None, HashMap::new()),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    (None, HashMap::new(), Vec::new())
+                }
                 Err(err) => return Err(StoreError::Io(err)),
             };
 
@@ -484,6 +641,7 @@ impl ArtifactStore {
             artifact_types: type_map,
             artifacts,
             execution_records,
+            supersessions,
             execution_contract_hash,
             store_dir,
             type_level_scan_gaps: HashSet::new(),
@@ -603,6 +761,154 @@ impl ArtifactStore {
         self.execution_records
             .remove(&(protocol.to_string(), work_unit.map(str::to_owned)));
         self.persist_execution_records()
+    }
+
+    /// Apply a supersession disposition: mark the recorded execution of
+    /// `protocol` for `work_unit` as superseded, rejecting the named output
+    /// revisions, so the protocol regenerates against its unchanged inputs.
+    ///
+    /// The disposition is guarded against current reality: an execution
+    /// record must exist for the pair, every named output must be an output
+    /// the protocol declares, its instance must be recorded for the scope,
+    /// and the supplied revision must equal the instance's current content
+    /// hash — each mismatch is rejected with a diagnostic naming it. On
+    /// success the current record moves into an append-only
+    /// [`SupersededExecution`] lineage entry together with the rejected
+    /// artifact content (read back from the workspace file and verified
+    /// against the supplied revision), and the pair is left with no current
+    /// record: the pending state that [`Self::pending_supersession`]
+    /// reports, resolved by the next recorded execution.
+    pub fn supersede_execution(
+        &mut self,
+        protocol: &crate::model::ProtocolDeclaration,
+        work_unit: Option<&str>,
+        rejected_outputs: &[(String, String, String)],
+        reason: &str,
+    ) -> Result<(), SupersedeError> {
+        if reason.trim().is_empty() {
+            return Err(SupersedeError::EmptyReason);
+        }
+        if rejected_outputs.is_empty() {
+            return Err(SupersedeError::EmptyOutputs);
+        }
+        let record = self
+            .execution_record(&protocol.name, work_unit)
+            .cloned()
+            .ok_or_else(|| SupersedeError::NoExecutionRecord {
+                protocol: protocol.name.clone(),
+                work_unit: work_unit.map(str::to_owned),
+            })?;
+
+        let mut preserved = Vec::with_capacity(rejected_outputs.len());
+        for (artifact_type, instance_id, supplied_hash) in rejected_outputs {
+            let declared = protocol
+                .produces
+                .iter()
+                .chain(protocol.may_produce.iter())
+                .chain(protocol.required_choice_members())
+                .any(|declared| declared == artifact_type);
+            if !declared {
+                return Err(SupersedeError::UndeclaredOutputType {
+                    protocol: protocol.name.clone(),
+                    artifact_type: artifact_type.clone(),
+                });
+            }
+
+            let state = self
+                .instances_of(artifact_type, work_unit)
+                .into_iter()
+                .find(|(id, _)| id == instance_id)
+                .map(|(_, state)| state.clone())
+                .ok_or_else(|| SupersedeError::UnknownInstance {
+                    artifact_type: artifact_type.clone(),
+                    instance_id: instance_id.clone(),
+                    work_unit: work_unit.map(str::to_owned),
+                })?;
+            if state.content_hash != *supplied_hash {
+                return Err(SupersedeError::StaleRevision {
+                    artifact_type: artifact_type.clone(),
+                    instance_id: instance_id.clone(),
+                    supplied: supplied_hash.clone(),
+                    current: state.content_hash.clone(),
+                });
+            }
+
+            let unreadable = |detail: String| SupersedeError::UnreadableArtifact {
+                artifact_type: artifact_type.clone(),
+                instance_id: instance_id.clone(),
+                path: state.path.clone(),
+                detail,
+            };
+            let raw =
+                std::fs::read_to_string(&state.path).map_err(|err| unreadable(err.to_string()))?;
+            let content: Value =
+                serde_json::from_str(&raw).map_err(|err| unreadable(err.to_string()))?;
+            let file_hash = content_hash(&content);
+            if file_hash != *supplied_hash {
+                return Err(SupersedeError::StaleRevision {
+                    artifact_type: artifact_type.clone(),
+                    instance_id: instance_id.clone(),
+                    supplied: supplied_hash.clone(),
+                    current: file_hash,
+                });
+            }
+
+            preserved.push(RejectedOutput {
+                artifact_type: artifact_type.clone(),
+                instance_id: instance_id.clone(),
+                content_hash: supplied_hash.clone(),
+                content,
+            });
+        }
+
+        self.execution_records
+            .remove(&(protocol.name.clone(), work_unit.map(str::to_owned)));
+        self.supersessions.push(SupersededExecution {
+            protocol: protocol.name.clone(),
+            work_unit: work_unit.map(str::to_owned),
+            reason: reason.to_string(),
+            rejected_outputs: preserved,
+            superseded_record: record,
+        });
+        self.persist_execution_records()
+            .map_err(SupersedeError::Store)
+    }
+
+    /// All supersession lineage entries, in disposition order.
+    pub fn supersessions(&self) -> &[SupersededExecution] {
+        &self.supersessions
+    }
+
+    /// Whether `(protocol, work_unit)` has a superseded execution and no
+    /// current execution record — the state in which the protocol must
+    /// regenerate against its unchanged inputs.
+    pub fn pending_supersession(&self, protocol: &str, work_unit: Option<&str>) -> bool {
+        self.execution_record(protocol, work_unit).is_none()
+            && self
+                .supersessions
+                .iter()
+                .any(|entry| entry.protocol == protocol && entry.work_unit.as_deref() == work_unit)
+    }
+
+    /// Whether the exact revision `(artifact_type, instance_id,
+    /// content_hash)` is rejected by a supersession that is still pending.
+    /// Execution records whose input snapshots contain such a revision are
+    /// not current: their recorded inputs derive from a rejected output.
+    pub fn revision_is_pending_rejected(
+        &self,
+        artifact_type: &str,
+        instance_id: &str,
+        content_hash: &str,
+    ) -> bool {
+        self.supersessions
+            .iter()
+            .filter(|entry| self.pending_supersession(&entry.protocol, entry.work_unit.as_deref()))
+            .flat_map(|entry| entry.rejected_outputs.iter())
+            .any(|rejected| {
+                rejected.artifact_type == artifact_type
+                    && rejected.instance_id == instance_id
+                    && rejected.content_hash == content_hash
+            })
     }
 
     pub(crate) fn stage_execution_record(
@@ -1004,6 +1310,7 @@ impl ArtifactStore {
         let json = serialize_execution_records(
             self.execution_contract_hash.as_deref(),
             &self.execution_records,
+            &self.supersessions,
         )?;
         std::fs::write(&tmp_path, json).map_err(StoreError::Io)?;
         std::fs::rename(&tmp_path, &file_path).map_err(StoreError::Io)?;
@@ -2286,5 +2593,292 @@ mod tests {
         let persisted = std::fs::read_to_string(type_dir.join("spec.json")).unwrap();
         assert!(persisted.contains("\"display_path\": \"reports/spec.json\""));
         assert!(persisted.contains("\"unix_bytes\""), "{persisted}");
+    }
+
+    fn supersede_test_protocol(name: &str, produces: &[&str]) -> crate::model::ProtocolDeclaration {
+        crate::model::ProtocolDeclaration {
+            name: name.into(),
+            requires: Vec::new(),
+            accepts: Vec::new(),
+            produces: produces.iter().map(|s| s.to_string()).collect(),
+            may_produce: Vec::new(),
+            required_output_choices: Vec::new(),
+            scoped: false,
+            trigger: crate::model::TriggerCondition::OnChange {
+                name: produces[0].into(),
+            },
+            instructions: None,
+        }
+    }
+
+    /// Write an artifact file to disk and record it, returning its content hash.
+    fn record_file(
+        store: &mut ArtifactStore,
+        dir: &Path,
+        artifact_type: &str,
+        instance_id: &str,
+        data: &Value,
+    ) -> String {
+        let type_dir = dir.join(artifact_type);
+        std::fs::create_dir_all(&type_dir).unwrap();
+        let path = type_dir.join(format!("{instance_id}.json"));
+        std::fs::write(&path, serde_json::to_string_pretty(data).unwrap()).unwrap();
+        store
+            .record(artifact_type, instance_id, &path, data)
+            .unwrap();
+        store
+            .get(artifact_type, instance_id)
+            .unwrap()
+            .content_hash
+            .clone()
+    }
+
+    fn simple_record(store: &ArtifactStore, input_type: &str) -> ExecutionRecord {
+        ExecutionRecord {
+            input_modes: BTreeMap::from([(input_type.to_string(), ExecutionInputMode::ValidOnly)]),
+            inputs: store.execution_input_snapshot([input_type], None),
+        }
+    }
+
+    #[test]
+    fn supersede_moves_record_to_pending_lineage_and_persists() {
+        let tmp = TempDir::new().unwrap();
+        let ws = tmp.path().join("ws");
+        let store_dir = tmp.path().join("store");
+        let mut store = make_store(&store_dir, vec!["intent", "requirements"]);
+        record_file(&mut store, &ws, "intent", "seed", &json!({"title": "seed"}));
+        let req_hash = record_file(
+            &mut store,
+            &ws,
+            "requirements",
+            "reqs",
+            &json!({"title": "reqs"}),
+        );
+
+        let protocol = supersede_test_protocol("survey", &["requirements"]);
+        let record = simple_record(&store, "intent");
+        store
+            .record_execution("survey", None, record.clone())
+            .unwrap();
+
+        store
+            .supersede_execution(
+                &protocol,
+                None,
+                &[("requirements".into(), "reqs".into(), req_hash.clone())],
+                "governance found the requirements defective",
+            )
+            .unwrap();
+
+        assert!(store.execution_record("survey", None).is_none());
+        assert!(store.pending_supersession("survey", None));
+        assert!(store.revision_is_pending_rejected("requirements", "reqs", &req_hash));
+        let lineage = store.supersessions();
+        assert_eq!(lineage.len(), 1);
+        assert_eq!(lineage[0].superseded_record, record);
+        assert_eq!(
+            lineage[0].rejected_outputs[0].content,
+            json!({"title": "reqs"})
+        );
+        assert_eq!(
+            lineage[0].reason,
+            "governance found the requirements defective"
+        );
+
+        // The lineage and the pending state survive a store reload.
+        drop(store);
+        let reloaded = make_store(&store_dir, vec!["intent", "requirements"]);
+        assert!(reloaded.pending_supersession("survey", None));
+        assert!(reloaded.revision_is_pending_rejected("requirements", "reqs", &req_hash));
+        assert_eq!(reloaded.supersessions().len(), 1);
+        assert_eq!(
+            reloaded.supersessions()[0].rejected_outputs[0].content,
+            json!({"title": "reqs"})
+        );
+    }
+
+    #[test]
+    fn recording_a_new_execution_resolves_the_pending_supersession() {
+        let tmp = TempDir::new().unwrap();
+        let ws = tmp.path().join("ws");
+        let mut store = make_store(&tmp.path().join("store"), vec!["intent", "requirements"]);
+        record_file(&mut store, &ws, "intent", "seed", &json!({"title": "seed"}));
+        let req_hash = record_file(
+            &mut store,
+            &ws,
+            "requirements",
+            "reqs",
+            &json!({"title": "reqs"}),
+        );
+
+        let protocol = supersede_test_protocol("survey", &["requirements"]);
+        store
+            .record_execution("survey", None, simple_record(&store, "intent"))
+            .unwrap();
+        store
+            .supersede_execution(
+                &protocol,
+                None,
+                &[("requirements".into(), "reqs".into(), req_hash.clone())],
+                "defective",
+            )
+            .unwrap();
+        assert!(store.pending_supersession("survey", None));
+
+        store
+            .record_execution("survey", None, simple_record(&store, "intent"))
+            .unwrap();
+        assert!(!store.pending_supersession("survey", None));
+        assert!(!store.revision_is_pending_rejected("requirements", "reqs", &req_hash));
+        // The lineage entry stays, resolved.
+        assert_eq!(store.supersessions().len(), 1);
+    }
+
+    #[test]
+    fn supersede_rejects_each_mismatch_with_an_accurate_diagnostic() {
+        let tmp = TempDir::new().unwrap();
+        let ws = tmp.path().join("ws");
+        let mut store = make_store(&tmp.path().join("store"), vec!["intent", "requirements"]);
+        record_file(&mut store, &ws, "intent", "seed", &json!({"title": "seed"}));
+        let req_hash = record_file(
+            &mut store,
+            &ws,
+            "requirements",
+            "reqs",
+            &json!({"title": "reqs"}),
+        );
+        let protocol = supersede_test_protocol("survey", &["requirements"]);
+
+        // No execution record for the target.
+        let err = store
+            .supersede_execution(
+                &protocol,
+                None,
+                &[("requirements".into(), "reqs".into(), req_hash.clone())],
+                "reason",
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, SupersedeError::NoExecutionRecord { .. }),
+            "{err}"
+        );
+
+        store
+            .record_execution("survey", None, simple_record(&store, "intent"))
+            .unwrap();
+
+        // Empty reason.
+        let err = store
+            .supersede_execution(
+                &protocol,
+                None,
+                &[("requirements".into(), "reqs".into(), req_hash.clone())],
+                "  ",
+            )
+            .unwrap_err();
+        assert!(matches!(err, SupersedeError::EmptyReason), "{err}");
+
+        // No outputs named.
+        let err = store
+            .supersede_execution(&protocol, None, &[], "reason")
+            .unwrap_err();
+        assert!(matches!(err, SupersedeError::EmptyOutputs), "{err}");
+
+        // Output type the protocol does not declare.
+        let err = store
+            .supersede_execution(
+                &protocol,
+                None,
+                &[("intent".into(), "seed".into(), "sha256:x".into())],
+                "reason",
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, SupersedeError::UndeclaredOutputType { .. }),
+            "{err}"
+        );
+
+        // Instance not recorded.
+        let err = store
+            .supersede_execution(
+                &protocol,
+                None,
+                &[("requirements".into(), "absent".into(), req_hash.clone())],
+                "reason",
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, SupersedeError::UnknownInstance { .. }),
+            "{err}"
+        );
+
+        // Stale revision: diagnostic names the current hash.
+        let err = store
+            .supersede_execution(
+                &protocol,
+                None,
+                &[("requirements".into(), "reqs".into(), "sha256:stale".into())],
+                "reason",
+            )
+            .unwrap_err();
+        match &err {
+            SupersedeError::StaleRevision {
+                current, supplied, ..
+            } => {
+                assert_eq!(current, &req_hash);
+                assert_eq!(supplied, "sha256:stale");
+            }
+            other => panic!("expected StaleRevision, got: {other:?}"),
+        }
+
+        // Every rejection left the record and lineage untouched.
+        assert!(store.execution_record("survey", None).is_some());
+        assert!(store.supersessions().is_empty());
+        assert!(!store.pending_supersession("survey", None));
+    }
+
+    #[test]
+    fn supersede_rejects_an_unreadable_workspace_artifact() {
+        let tmp = TempDir::new().unwrap();
+        let mut store = make_store(&tmp.path().join("store"), vec!["intent", "requirements"]);
+        // Recorded state with no backing file on disk.
+        store
+            .record(
+                "requirements",
+                "reqs",
+                &tmp.path().join("ws/requirements/reqs.json"),
+                &json!({"title": "reqs"}),
+            )
+            .unwrap();
+        let req_hash = store
+            .get("requirements", "reqs")
+            .unwrap()
+            .content_hash
+            .clone();
+        let protocol = supersede_test_protocol("survey", &["requirements"]);
+        store
+            .record_execution(
+                "survey",
+                None,
+                ExecutionRecord {
+                    input_modes: BTreeMap::new(),
+                    inputs: ExecutionInputSnapshot::default(),
+                },
+            )
+            .unwrap();
+
+        let err = store
+            .supersede_execution(
+                &protocol,
+                None,
+                &[("requirements".into(), "reqs".into(), req_hash)],
+                "reason",
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, SupersedeError::UnreadableArtifact { .. }),
+            "{err}"
+        );
+        assert!(store.execution_record("survey", None).is_some());
     }
 }

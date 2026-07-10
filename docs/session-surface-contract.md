@@ -189,6 +189,19 @@ protocol, schema, validator, or contract failed to encode what good required.
 The repair belongs at that source, not in an ad hoc override of a conforming
 transition.
 
+That judgment re-enters the graph through one sanctioned, auditable runtime
+operation: the supersession disposition (`runa supersede`). It marks the
+recorded execution of the producing protocol superseded — targeting the exact
+protocol, output identity, and current revision, and carrying a required
+reason — so the protocol becomes READY against its unchanged inputs, while
+the rejected execution and output revisions are preserved as lineage and
+downstream state derived from them is no longer current. The disposition does
+not execute anything: regeneration flows only through the same session
+surface as any other work, and recording the regenerated execution resolves
+the pending supersession. Deleting outputs, mutating inputs to force
+freshness, hand-spawning fixed-protocol servers, or editing execution records
+directly are outside this contract.
+
 ## Lifecycle-Reachability Contract
 
 The session lifecycle is expressed as methodology protocols and driven by

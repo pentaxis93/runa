@@ -92,7 +92,8 @@ pub use status::{
 };
 pub use store::{
     ArtifactState, ArtifactStore, ExecutionInput, ExecutionInputMode, ExecutionInputSnapshot,
-    ExecutionRecord, StoreError, ValidationStatus, execution_contract_hash,
+    ExecutionRecord, RejectedOutput, StoreError, SupersedeError, SupersededExecution,
+    ValidationStatus, execution_contract_hash,
 };
 pub use trigger::{TriggerContext, TriggerResult, evaluate as evaluate_trigger};
 pub use validation::{ValidationError, Violation};

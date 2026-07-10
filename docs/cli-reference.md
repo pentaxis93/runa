@@ -395,6 +395,59 @@ fails with exit `5`.
 | 5 | Work was attempted, but the agent did not advance the selected session step. |
 | 6 | Infrastructure failure: an agent that failed to start (exited without executing any protocol work or delivering any artifact), or a project/config/load/scan/serialization/bootstrap/MCP lookup/runtime I/O failure, prevented completion from being established. |
 
+### `runa supersede`
+
+```bash
+runa supersede --protocol <NAME> [--work-unit <ID>] \
+  --output <type>/<instance>@<revision> [--output ...] \
+  --reason <TEXT> [--config <PATH>]
+```
+
+Applies a supersession disposition to a recorded protocol execution. A
+protocol output can be schema-valid and current by input identity while
+governance judges its content defective; this operation is the sanctioned
+way that judgment re-enters the graph. It marks the recorded execution
+superseded so the producing protocol becomes READY against its unchanged
+inputs, while the rejected execution and output revisions are preserved as
+inspectable lineage in `.runa/store/execution-records.json`.
+
+The disposition is guarded against current reality. `supersede` runs the
+implicit workspace scan first, then rejects — each with a diagnostic naming
+the mismatch — a protocol the methodology does not declare, a target with no
+execution record for the scope, an output artifact type the protocol does
+not declare, an instance not recorded for the scope, and a revision that is
+not the instance's current content hash (the diagnostic names the current
+revision). The reason is required and recorded verbatim in the lineage
+entry. Scoped invocations validate `--work-unit` against canonical recorded
+work-unit identity exactly as other scope-taking commands do.
+
+After the disposition, readiness reflects it everywhere the shared
+evaluation runs (`state`, `step`, `run`, `go`, and the session surface): the
+producer is READY, and any execution record whose recorded inputs contain a
+rejected revision is no longer current, so downstream state derived from the
+rejected output reopens. Regeneration itself flows only through the normal
+execution paths; recording the regenerated execution resolves the pending
+supersession. No workspace deletion, output editing, or direct
+execution-record mutation is part of the supported path.
+
+**Flags:**
+
+- `--protocol <NAME>` — Protocol whose recorded execution is superseded.
+- `--work-unit <ID>` — Delegated work unit of the recorded execution.
+- `--output <type>/<instance>@<revision>` — Rejected output revision;
+  repeatable. The revision is the instance's `sha256:<hex>` content hash as
+  reported in `.runa/store/<type>/<instance>.json`.
+- `--reason <TEXT>` — Auditable reason for rejecting the conforming output.
+
+**Exit codes:**
+
+| Code | Meaning |
+|------|---------|
+| 0 | The disposition was applied; the producer regenerates against unchanged inputs. |
+| 1 | The disposition was rejected against current reality (wrong protocol, output identity, or stale revision; empty reason or outputs). |
+| 2 | Usage error, including a malformed `--output` token. |
+| 6 | Infrastructure failure: project/config/load/scan or store I/O prevented the disposition. |
+
 ## MCP Server
 
 `runa-mcp` is a stdio MCP server with two modes.

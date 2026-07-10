@@ -25,6 +25,22 @@ Semantic Versioning.
   through unchanged and never invokes `create-work-unit`. Operator contract:
   `docs/session-surface-contract.md` §Required-Forge-Mutation Contract.
 
+- **Supersession disposition — a rejected conforming output regenerates
+  against unchanged inputs** (tesserine/runa#248): `runa supersede
+  --protocol <NAME> [--work-unit <ID>] --output <type>/<instance>@<revision>
+  --reason <TEXT>` marks a recorded protocol execution superseded, guarded
+  against current reality (declared protocol, existing record, declared
+  output type, recorded instance, current revision — each mismatch rejected
+  with a diagnostic naming it). The superseded record, the auditable reason,
+  and the rejected revisions' preserved content persist as append-only
+  lineage in `execution-records.json`; readiness treats the pending pair as
+  not-current (timestamp fallback bypassed) and treats any execution record
+  whose input snapshot contains a pending-rejected revision as not-current,
+  so the producer becomes READY and downstream state derived from the
+  rejected output reopens. Regeneration flows only through the normal
+  `step`/`run`/`go`/session paths; recording the regenerated execution
+  resolves the pending state.
+
 - **`read-work-unit` returns the work-unit comment log** per forge-capability
   `2.0.0` (tesserine/commons#106; contract constants re-pinned to
   `e75e211`'s immutable v2 schema URL): the work-unit snapshot carries an

@@ -40,7 +40,7 @@ These are library capabilities exposed by libagent and consumed by both the CLI 
 
 5. **Context injection construction.** `context::build_context` converts a ready `ProtocolDeclaration` plus the current artifact store into the stable agent-facing context used by `runa step`: protocol name, optional `work_unit`, available required/accepted artifact refs, and expected outputs. Store scoping still includes unpartitioned artifacts as shared inputs when a work unit is active. `context::render_context_prompt` turns that context into the prose prompt delivered on stdin during live execution.
 
-6. **Protocol selection.** `selection::discover_ready_candidates` evaluates protocols in topological order under an explicit `EvaluationScope`. `EvaluationScope::Unscoped` evaluates only protocols with `scoped = false` and always uses `work_unit = None`. `EvaluationScope::Scoped(id)` evaluates only protocols with `scoped = true` for that exact delegated work unit. Readiness no longer discovers sibling work units from artifact instances. Current work is suppressed only when outputs are valid and trusted plus either: the current freshness-relevant input snapshot matches the last successful execution record for that `(protocol, work_unit)` pair, or no execution record exists and the timestamp fallback still shows outputs newer than all relevant inputs. Execution-record snapshots are mode-aware: `on_change`/`on_invalid` preserve any recorded matching instance, while `on_artifact` and `requires` compare only valid instances. The timestamp fallback still considers the latest recorded modification across relevant inputs.
+6. **Protocol selection.** `selection::discover_ready_candidates` evaluates protocols in topological order under an explicit `EvaluationScope`. `EvaluationScope::Unscoped` evaluates only protocols with `scoped = false` and always uses `work_unit = None`. `EvaluationScope::Scoped(id)` evaluates only protocols with `scoped = true` for that exact delegated work unit. Readiness no longer discovers sibling work units from artifact instances. Current work is suppressed only when outputs are valid and trusted plus either: the current freshness-relevant input snapshot matches the last successful execution record for that `(protocol, work_unit)` pair, or no execution record exists and the timestamp fallback still shows outputs newer than all relevant inputs. A pending supersession overrides both paths: the pair is not current — the producer regenerates against its unchanged inputs and the timestamp fallback is not consulted — and an execution record whose input snapshot contains a pending-rejected revision is not current regardless of snapshot equality. Execution-record snapshots are mode-aware: `on_change`/`on_invalid` preserve any recorded matching instance, while `on_artifact` and `requires` compare only valid instances. The timestamp fallback still considers the latest recorded modification across relevant inputs.
 
 7. **Scoped work-unit identity validation.** After workspace scan and before scoped readiness evaluation, `runa state`, `runa step`, `runa run`, and `runa go` validate that the supplied `--work-unit` exactly matches a recorded `work-unit` instance id when any are recorded. Invalid and malformed recorded roots still establish canonical ids. Valid tracker-backed roots also enforce instance-id/handle number agreement, duplicate tracker-root rejection, and agreement with the active forge deployment identity resolved from `.runa/config.toml` with `RUNA_FORGE_*` env overrides. With no recorded `work-unit` roots, scoped evaluation remains inert.
 
@@ -92,7 +92,7 @@ Stable agent-facing context injection contract plus prompt rendering. `build_con
 
 ### `store.rs`
 
-Artifact state tracking keyed by `(type_name, instance_id)`. Each `ArtifactState` records the filesystem path, `ValidationStatus` (Valid, Invalid with violations, Malformed with a parse error, or Stale), millisecond-precision modification timestamp, a `sha256:<hex>` content hash, a `schema_hash` for the artifact type schema used during validation, and an optional `work_unit` string extracted from artifact JSON at record time. Parsed JSON uses canonical JSON hashing (recursively sorted keys); malformed files hash raw bytes. Persists artifact state as JSON files under `.runa/store/{type_name}/{instance_id}.json` using a byte-preserving path encoding (`unix_bytes` on Unix, `windows_wide` on Windows) plus a lossy `display_path` for inspection, and still accepts legacy string-path store records on load. Separately persists execution metadata in `.runa/store/execution-records.json`: a manifest-contract hash plus per-`(protocol, work_unit)` records of the freshness-relevant input snapshot from the last successful execution, including invalid or malformed instances only for inputs whose freshness mode is `AnyRecorded`. Uses atomic write (tmp + rename). Separately, the store keeps non-persisted scan-gap metadata for the current process so completion/freshness checks can distinguish whole-type scan failures from unreadable specific instances.
+Artifact state tracking keyed by `(type_name, instance_id)`. Each `ArtifactState` records the filesystem path, `ValidationStatus` (Valid, Invalid with violations, Malformed with a parse error, or Stale), millisecond-precision modification timestamp, a `sha256:<hex>` content hash, a `schema_hash` for the artifact type schema used during validation, and an optional `work_unit` string extracted from artifact JSON at record time. Parsed JSON uses canonical JSON hashing (recursively sorted keys); malformed files hash raw bytes. Persists artifact state as JSON files under `.runa/store/{type_name}/{instance_id}.json` using a byte-preserving path encoding (`unix_bytes` on Unix, `windows_wide` on Windows) plus a lossy `display_path` for inspection, and still accepts legacy string-path store records on load. Separately persists execution metadata in `.runa/store/execution-records.json`: a manifest-contract hash plus per-`(protocol, work_unit)` records of the freshness-relevant input snapshot from the last successful execution, including invalid or malformed instances only for inputs whose freshness mode is `AnyRecorded`, and an append-only supersession lineage — each entry the target `(protocol, work_unit)`, an auditable reason, the rejected output revisions with their preserved content, and the execution record the disposition displaced. A supersession is pending while its pair has no current record; pendingness is computed from that relation, never stored, so any recording path resolves it. Uses atomic write (tmp + rename). Separately, the store keeps non-persisted scan-gap metadata for the current process so completion/freshness checks can distinguish whole-type scan failures from unreadable specific instances.
 
 Query methods (`is_valid`, `has_any_invalid`, `instances_of`, `latest_modification_ms`) accept an `Option<&str>` work unit filter. `None` returns all instances (unscoped). `Some(wu)` returns instances matching that work unit plus unpartitioned instances (those with no `work_unit` field). This scoping threads through trigger evaluation, enforcement, and context injection.
 
@@ -190,7 +190,7 @@ surface.
     {type_name}/
       {instance_id}.json        # Agent-produced artifact file
   store/                        # Internal runtime state store (not configurable)
-    execution-records.json      # Execution contract hash + last successful valid-input snapshots per (protocol, work_unit)
+    execution-records.json      # Execution contract hash + last successful valid-input snapshots per (protocol, work_unit) + supersession lineage
     {type_name}/
       {instance_id}.json        # ArtifactState: encoded path + display_path, status, last_modified_ms, content_hash, schema_hash, work_unit
 ```
@@ -265,6 +265,33 @@ selected session step produced a successful `advance` transition receipt from
 the session surface, then reloads the store to print refreshed readiness. A
 successful process exit without a session advance is treated as attempted-work
 failure.
+
+### `runa supersede --protocol <NAME> [--work-unit <ID>] --output <type>/<instance>@<revision> --reason <TEXT>`
+
+Applies a supersession disposition to a recorded protocol execution: the
+sanctioned operation by which a conforming-but-rejected output re-enters the
+graph for regeneration against unchanged inputs. Runs the implicit workspace
+scan first, then validates the disposition against current reality — the
+protocol must be declared, an execution record must exist for the scope, each
+`--output` (repeatable) must name an output artifact type the protocol
+declares, a recorded instance for the scope, and that instance's current
+content hash — and rejects each mismatch with a diagnostic naming it (a stale
+revision diagnostic names the current one). Scoped invocations run the same
+canonical work-unit identity validation as the other scope-taking commands.
+
+On success, the current execution record moves into an append-only
+supersession lineage entry in `execution-records.json` together with the
+auditable reason and the rejected revisions' content (read back from the
+workspace and verified against the supplied hash), leaving the pair with no
+current record. Readiness evaluation treats that pending state as
+not-current: the producer becomes READY for its unchanged inputs, the
+timestamp fallback is not consulted, and any execution record whose input
+snapshot contains a pending-rejected revision is likewise not current, so
+downstream state derived from the rejected output reopens. The pending state
+resolves when the next execution is recorded for the pair through any normal
+path (`step`, `run`, `go`, or the session surface); the lineage entry
+remains. Exit codes: `0` applied, `1` disposition rejected against current
+reality, `2` malformed invocation, `6` infrastructure failure.
 
 ## Key Design Patterns
 
