@@ -68,6 +68,25 @@ enum Commands {
         #[arg(long)]
         work_unit: Option<String>,
     },
+    /// Supersede a recorded protocol execution so it regenerates against
+    /// unchanged inputs
+    Supersede {
+        /// Protocol whose recorded execution is superseded
+        #[arg(long)]
+        protocol: String,
+
+        /// Delegated work unit of the recorded execution
+        #[arg(long)]
+        work_unit: Option<String>,
+
+        /// Rejected output revision as <type>/<instance>@<revision>; repeatable
+        #[arg(long = "output", required = true)]
+        outputs: Vec<String>,
+
+        /// Auditable reason for rejecting the conforming output
+        #[arg(long)]
+        reason: String,
+    },
 }
 
 #[derive(Args)]
@@ -237,6 +256,23 @@ fn main() {
                     }
                 }
                 Err(err) => fatal_command_error("go", &err, err.exit_code()),
+            }
+        }
+        Commands::Supersede {
+            protocol,
+            work_unit,
+            outputs,
+            reason,
+        } => {
+            if let Err(err) = commands::supersede::run(
+                &working_dir,
+                config_override_ref,
+                &protocol,
+                work_unit.as_deref(),
+                &outputs,
+                &reason,
+            ) {
+                fatal_command_error("supersede", &err, err.exit_code());
             }
         }
     }

@@ -350,9 +350,21 @@ fn protocol_is_current(
         return false;
     };
 
+    // Mirror of the live rule: a supersession pending in this projection —
+    // no store record and no projected re-run yet — keeps the producer
+    // non-current, and a record whose inputs contain a revision rejected by
+    // such a supersession is non-current. A projected re-run of the
+    // producer resolves both within the projection.
+    if projection.pending_supersession(&protocol.name, work_unit) {
+        return false;
+    }
+
     let freshness_inputs = protocol_freshness_inputs(protocol);
 
     if let Some(record) = projection.execution_record(&protocol.name, work_unit) {
+        if projection.record_contains_pending_rejected(record) {
+            return false;
+        }
         let current_inputs =
             projection.execution_input_snapshot(record.input_modes.iter(), work_unit);
         return record.inputs == current_inputs;
@@ -706,6 +718,42 @@ impl<'a> ProjectionState<'a> {
         self.projected_execution_records
             .get(&key)
             .or_else(|| self.store.execution_record(protocol, work_unit))
+    }
+
+    /// Projection view of pending supersession: pending in the store and not
+    /// yet resolved by a projected re-run of the pair within this cascade.
+    fn pending_supersession(&self, protocol: &str, work_unit: Option<&str>) -> bool {
+        self.execution_record(protocol, work_unit).is_none()
+            && self
+                .store
+                .supersessions()
+                .iter()
+                .any(|entry| entry.protocol == protocol && entry.work_unit.as_deref() == work_unit)
+    }
+
+    /// Whether the record's input snapshot contains a revision rejected by a
+    /// supersession still pending in this projection.
+    fn record_contains_pending_rejected(&self, record: &ExecutionRecord) -> bool {
+        record
+            .inputs
+            .artifact_types
+            .iter()
+            .any(|(artifact_type, inputs)| {
+                inputs.iter().any(|input| {
+                    self.store
+                        .supersessions()
+                        .iter()
+                        .filter(|entry| {
+                            self.pending_supersession(&entry.protocol, entry.work_unit.as_deref())
+                        })
+                        .flat_map(|entry| entry.rejected_outputs.iter())
+                        .any(|rejected| {
+                            rejected.artifact_type == *artifact_type
+                                && rejected.instance_id == input.instance_id
+                                && rejected.content_hash == input.content_hash
+                        })
+                })
+            })
     }
 
     fn execution_input_snapshot<'b, I>(
@@ -1682,5 +1730,92 @@ mod tests {
                 projection: ProjectionClass::Current,
             }]
         );
+    }
+
+    /// A pending supersession keeps the producer ready in the projection —
+    /// and the projected cascade resolves it: after the producer's projected
+    /// re-run, the pair is no longer pending within the projection.
+    #[test]
+    fn pending_supersession_reopens_the_producer_in_projection() {
+        let tmp = TempDir::new().unwrap();
+        let ws = tmp.path().join("ws");
+        let mut store = make_store(&tmp.path().join("store"), vec!["intent", "requirements"]);
+        for (artifact_type, instance_id, data, ts) in [
+            ("intent", "seed", json!({"title": "seed"}), 1000u64),
+            ("requirements", "reqs", json!({"title": "reqs"}), 2000u64),
+        ] {
+            let type_dir = ws.join(artifact_type);
+            std::fs::create_dir_all(&type_dir).unwrap();
+            let path = type_dir.join(format!("{instance_id}.json"));
+            std::fs::write(&path, serde_json::to_string_pretty(&data).unwrap()).unwrap();
+            store
+                .record_with_timestamp(artifact_type, instance_id, &path, &data, ts)
+                .unwrap();
+        }
+        let req_hash = store
+            .instances_of("requirements", None)
+            .into_iter()
+            .find(|(id, _)| *id == "reqs")
+            .map(|(_, state)| state.content_hash.clone())
+            .unwrap();
+        let survey = protocol(
+            "survey",
+            &["intent"],
+            &["requirements"],
+            TriggerCondition::OnArtifact {
+                name: "intent".into(),
+            },
+        );
+        store
+            .record_execution(
+                "survey",
+                None,
+                ExecutionRecord {
+                    input_modes: [("intent".to_string(), FreshnessInputMode::ValidOnly)]
+                        .into_iter()
+                        .collect(),
+                    inputs: store.execution_input_snapshot(["intent"], None),
+                },
+            )
+            .unwrap();
+
+        // Suppressed before the disposition.
+        let partials = HashSet::new();
+        let projection = ProjectionState::new(&store, &partials);
+        let ready = discover_ready_candidates_projection(
+            std::slice::from_ref(&survey),
+            &projection,
+            &["survey"],
+            EvaluationScope::Unscoped,
+        );
+        assert!(ready.is_empty());
+
+        store
+            .supersede_execution(
+                &survey,
+                None,
+                &[("requirements".to_string(), "reqs".to_string(), req_hash)],
+                "defective",
+            )
+            .unwrap();
+
+        // Ready in the projection after the disposition; the projected
+        // cascade runs the producer to quiescence.
+        let projected = project_cascade(
+            &[survey],
+            &store,
+            &["survey"],
+            &[Candidate {
+                protocol_name: "survey".into(),
+                work_unit: None,
+            }],
+            &partials,
+            EvaluationScope::Unscoped,
+        );
+        let executed: Vec<&str> = projected
+            .iter()
+            .map(|entry| entry.protocol_name.as_str())
+            .collect();
+        assert_eq!(executed, ["survey"]);
     }
 }

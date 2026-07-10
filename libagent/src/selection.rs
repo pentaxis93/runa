@@ -385,7 +385,21 @@ fn protocol_is_current(
         return false;
     };
 
+    // A pending supersession is an operator judgment that the recorded
+    // execution's output is defective against these very inputs: the
+    // protocol is not current until it regenerates, and the timestamp
+    // fallback below is never consulted for it.
+    if store.pending_supersession(&protocol.name, work_unit) {
+        return false;
+    }
+
     if let Some(record) = store.execution_record(&protocol.name, work_unit) {
+        // A record whose input snapshot contains a pending-rejected revision
+        // derived its outputs from a rejected output upstream: it is not
+        // current regardless of snapshot equality.
+        if record_contains_pending_rejected(store, record) {
+            return false;
+        }
         let current_inputs = execution_input_snapshot_for_freshness_inputs(
             store,
             record.input_modes.iter(),
@@ -406,6 +420,28 @@ fn protocol_is_current(
         })
         .max()
         .is_none_or(|latest_input| latest_input <= output_timestamp)
+}
+
+/// Whether the recorded input snapshot contains a revision rejected by a
+/// still-pending supersession — the recorded execution consumed an output
+/// that governance has judged defective and that has not yet regenerated.
+pub(crate) fn record_contains_pending_rejected(
+    store: &ArtifactStore,
+    record: &ExecutionRecord,
+) -> bool {
+    record
+        .inputs
+        .artifact_types
+        .iter()
+        .any(|(artifact_type, inputs)| {
+            inputs.iter().any(|input| {
+                store.revision_is_pending_rejected(
+                    artifact_type,
+                    &input.instance_id,
+                    &input.content_hash,
+                )
+            })
+        })
 }
 
 /// Merge a freshness mode for an artifact type that may appear under
@@ -3372,5 +3408,276 @@ mod tests {
             .collect();
 
         assert_eq!(ready_from_classify, ready_from_discover);
+    }
+
+    /// Write an artifact file to disk and record it with a timestamp,
+    /// returning its content hash. Supersession tests need real files
+    /// because the disposition preserves the rejected content from disk.
+    fn record_file_with_timestamp(
+        store: &mut ArtifactStore,
+        dir: &std::path::Path,
+        artifact_type: &str,
+        instance_id: &str,
+        data: &serde_json::Value,
+        timestamp_ms: u64,
+    ) -> String {
+        let type_dir = dir.join(artifact_type);
+        std::fs::create_dir_all(&type_dir).unwrap();
+        let path = type_dir.join(format!("{instance_id}.json"));
+        std::fs::write(&path, serde_json::to_string_pretty(data).unwrap()).unwrap();
+        store
+            .record_with_timestamp(artifact_type, instance_id, &path, data, timestamp_ms)
+            .unwrap();
+        store
+            .instances_of(artifact_type, None)
+            .into_iter()
+            .find(|(id, _)| *id == instance_id)
+            .map(|(_, state)| state.content_hash.clone())
+            .unwrap()
+    }
+
+    fn valid_only_record(store: &ArtifactStore, input_type: &str) -> ExecutionRecord {
+        ExecutionRecord {
+            input_modes: [(input_type.to_string(), FreshnessInputMode::ValidOnly)]
+                .into_iter()
+                .collect(),
+            inputs: store.execution_input_snapshot([input_type], None),
+        }
+    }
+
+    fn status_of<'a>(classified: &'a [ClassifiedCandidate], name: &str) -> &'a CandidateStatus {
+        &classified
+            .iter()
+            .find(|candidate| candidate.protocol_name == name)
+            .unwrap_or_else(|| panic!("no candidate '{name}'"))
+            .status
+    }
+
+    /// The complete planning case from tesserine/runa#248:
+    /// `intent → survey → requirements → decompose`, a byte-identical intent,
+    /// suppression via execution records, supersession of the rejected
+    /// requirements, regeneration of survey against the unchanged intent, and
+    /// correct downstream invalidation.
+    #[test]
+    fn supersession_regenerates_the_planning_case_against_unchanged_inputs() {
+        let tmp = TempDir::new().unwrap();
+        let ws = tmp.path().join("ws");
+        let mut store = make_store(
+            &tmp.path().join("s"),
+            vec!["intent", "requirements", "work-units"],
+        );
+        record_file_with_timestamp(
+            &mut store,
+            &ws,
+            "intent",
+            "replace-forge-connectors",
+            &json!({"title": "replace forge connectors with native radicle"}),
+            1000,
+        );
+        let rejected_hash = record_file_with_timestamp(
+            &mut store,
+            &ws,
+            "requirements",
+            "radicle-native-collaboration",
+            &json!({"title": "requirements v1"}),
+            2000,
+        );
+        record_file_with_timestamp(
+            &mut store,
+            &ws,
+            "work-units",
+            "wu-plan",
+            &json!({"title": "decomposed work"}),
+            3000,
+        );
+        store
+            .record_execution("survey", None, valid_only_record(&store, "intent"))
+            .unwrap();
+        store
+            .record_execution("decompose", None, valid_only_record(&store, "requirements"))
+            .unwrap();
+
+        let survey = make_protocol(
+            "survey",
+            &["intent"],
+            &[],
+            &["requirements"],
+            &[],
+            TriggerCondition::OnArtifact {
+                name: "intent".into(),
+            },
+        );
+        let decompose = make_protocol(
+            "decompose",
+            &["requirements"],
+            &[],
+            &["work-units"],
+            &[],
+            TriggerCondition::OnArtifact {
+                name: "requirements".into(),
+            },
+        );
+        let protocols = [survey.clone(), decompose];
+        let order = ["survey", "decompose"];
+
+        // Baseline: both executions recorded against current inputs — the
+        // whole pipeline is suppressed as outputs-current.
+        let classified = classify_candidates(
+            &protocols,
+            &store,
+            &order,
+            &HashSet::new(),
+            EvaluationScope::Unscoped,
+        );
+        for name in ["survey", "decompose"] {
+            assert!(
+                matches!(
+                    status_of(&classified, name),
+                    CandidateStatus::Waiting {
+                        waiting_reason: WaitingReason::OutputsCurrent,
+                        ..
+                    }
+                ),
+                "expected '{name}' suppressed as outputs-current"
+            );
+        }
+
+        // Governance rejects the conforming requirements: the disposition
+        // supersedes survey's execution, targeting the exact revision.
+        store
+            .supersede_execution(
+                &survey,
+                None,
+                &[(
+                    "requirements".to_string(),
+                    "radicle-native-collaboration".to_string(),
+                    rejected_hash.clone(),
+                )],
+                "requirements found substantively defective by governance",
+            )
+            .unwrap();
+
+        // The producer is READY against the unchanged intent; downstream
+        // state derived from the rejected output is no longer current.
+        let classified = classify_candidates(
+            &protocols,
+            &store,
+            &order,
+            &HashSet::new(),
+            EvaluationScope::Unscoped,
+        );
+        assert!(
+            matches!(status_of(&classified, "survey"), CandidateStatus::Ready),
+            "survey must regenerate against unchanged inputs"
+        );
+        assert!(
+            matches!(status_of(&classified, "decompose"), CandidateStatus::Ready),
+            "decompose derived from the rejected revision must not be current"
+        );
+
+        // Regeneration: survey re-executes against the byte-identical intent
+        // and produces a corrected requirements revision; the new execution
+        // is recorded through the normal path.
+        let regenerated_hash = record_file_with_timestamp(
+            &mut store,
+            &ws,
+            "requirements",
+            "radicle-native-collaboration",
+            &json!({"title": "requirements v2 — corrected"}),
+            4000,
+        );
+        assert_ne!(regenerated_hash, rejected_hash);
+        store
+            .record_execution("survey", None, valid_only_record(&store, "intent"))
+            .unwrap();
+
+        // Survey is current again; decompose reopens by the ordinary
+        // snapshot rule because its recorded input revision changed.
+        let classified = classify_candidates(
+            &protocols,
+            &store,
+            &order,
+            &HashSet::new(),
+            EvaluationScope::Unscoped,
+        );
+        assert!(matches!(
+            status_of(&classified, "survey"),
+            CandidateStatus::Waiting {
+                waiting_reason: WaitingReason::OutputsCurrent,
+                ..
+            }
+        ));
+        assert!(matches!(
+            status_of(&classified, "decompose"),
+            CandidateStatus::Ready
+        ));
+
+        // The rejected execution and output remain inspectable as lineage.
+        let lineage = store.supersessions();
+        assert_eq!(lineage.len(), 1);
+        assert_eq!(lineage[0].protocol, "survey");
+        assert_eq!(lineage[0].rejected_outputs[0].content_hash, rejected_hash);
+        assert_eq!(
+            lineage[0].rejected_outputs[0].content,
+            json!({"title": "requirements v1"})
+        );
+    }
+
+    #[test]
+    fn pending_supersession_bypasses_the_timestamp_fallback() {
+        let tmp = TempDir::new().unwrap();
+        let ws = tmp.path().join("ws");
+        let mut store = make_store(&tmp.path().join("s"), vec!["intent", "requirements"]);
+        // Output strictly newer than the input: the fallback alone would
+        // report the protocol current.
+        record_file_with_timestamp(
+            &mut store,
+            &ws,
+            "intent",
+            "seed",
+            &json!({"title": "seed"}),
+            1000,
+        );
+        let req_hash = record_file_with_timestamp(
+            &mut store,
+            &ws,
+            "requirements",
+            "reqs",
+            &json!({"title": "reqs"}),
+            2000,
+        );
+        let survey = make_protocol(
+            "survey",
+            &["intent"],
+            &[],
+            &["requirements"],
+            &[],
+            TriggerCondition::OnArtifact {
+                name: "intent".into(),
+            },
+        );
+        store
+            .record_execution("survey", None, valid_only_record(&store, "intent"))
+            .unwrap();
+        store
+            .supersede_execution(
+                &survey,
+                None,
+                &[("requirements".to_string(), "reqs".to_string(), req_hash)],
+                "defective",
+            )
+            .unwrap();
+
+        let classified = classify_candidates(
+            &[survey],
+            &store,
+            &["survey"],
+            &HashSet::new(),
+            EvaluationScope::Unscoped,
+        );
+        assert!(matches!(
+            status_of(&classified, "survey"),
+            CandidateStatus::Ready
+        ));
     }
 }
