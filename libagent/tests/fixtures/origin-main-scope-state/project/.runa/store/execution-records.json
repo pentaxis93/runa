@@ -1,0 +1,22 @@
+{
+  "contract_hash": "sha256:ed44aaaf06ea36e70b46c0c6fee543414a826100257feced2b2b4d3ab76a9468",
+  "records": [
+    {
+      "protocol": "consume",
+      "work_unit": "work-unit-a",
+      "input_modes": {
+        "request": "valid_only"
+      },
+      "inputs": {
+        "artifact_types": {
+          "request": [
+            {
+              "instance_id": "request-a",
+              "content_hash": "sha256:59428b9f4fa5b0e900618bf2122ce077f8e4bb57811c61da0305a303b58c4c63"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

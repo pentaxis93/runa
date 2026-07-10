@@ -72,24 +72,16 @@ fn analyze_node(
                 .iter()
                 .any(|property| property.as_str() == Some("work_unit"))
         });
+    if let Some((keyword, relevant_path)) =
+        unsupported_work_unit_effect(root, object, path, references)?
+    {
+        return Err(error(
+            &relevant_path,
+            &format!("'{keyword}' can change work_unit ownership, admissibility, or constraints"),
+        ));
+    }
     if required {
         return Ok(Outcome::Viable(WorkUnitOwnership::RuntimeRequired));
-    }
-
-    for keyword in [
-        "if",
-        "then",
-        "else",
-        "dependentRequired",
-        "dependentSchemas",
-        "not",
-    ] {
-        if object.contains_key(keyword) {
-            return Err(error(
-                &child_path(path, keyword),
-                &format!("'{keyword}' is not yet supported for work_unit ownership"),
-            ));
-        }
     }
 
     let property = object
@@ -143,6 +135,151 @@ fn analyze_node(
     }
 
     Ok(Outcome::Viable(ownership))
+}
+
+fn unsupported_work_unit_effect(
+    root: &Value,
+    object: &serde_json::Map<String, Value>,
+    path: &str,
+    references: &mut Vec<String>,
+) -> Result<Option<(&'static str, String)>, WorkUnitSchemaError> {
+    if object.contains_key("if") && (object.contains_key("then") || object.contains_key("else")) {
+        for keyword in ["if", "then", "else"] {
+            let Some(schema) = object.get(keyword) else {
+                continue;
+            };
+            let keyword_path = child_path(path, keyword);
+            if let Some(relevant_path) =
+                work_unit_effect_location(root, schema, &keyword_path, references)?
+            {
+                return Ok(Some((keyword, relevant_path)));
+            }
+        }
+    }
+
+    if let Some(dependencies) = object.get("dependentRequired").and_then(Value::as_object) {
+        let dependencies_path = child_path(path, "dependentRequired");
+        for (trigger, required) in dependencies {
+            let trigger_path = child_path(&dependencies_path, trigger);
+            if trigger == "work_unit" {
+                return Ok(Some(("dependentRequired", trigger_path)));
+            }
+            if let Some((index, _)) = required.as_array().and_then(|required| {
+                required
+                    .iter()
+                    .enumerate()
+                    .find(|(_, property)| property.as_str() == Some("work_unit"))
+            }) {
+                return Ok(Some((
+                    "dependentRequired",
+                    child_path(&trigger_path, &index.to_string()),
+                )));
+            }
+        }
+    }
+
+    if let Some(dependencies) = object.get("dependentSchemas").and_then(Value::as_object) {
+        let dependencies_path = child_path(path, "dependentSchemas");
+        for (trigger, schema) in dependencies {
+            let trigger_path = child_path(&dependencies_path, trigger);
+            if trigger == "work_unit" {
+                return Ok(Some(("dependentSchemas", trigger_path)));
+            }
+            if let Some(relevant_path) =
+                work_unit_effect_location(root, schema, &trigger_path, references)?
+            {
+                return Ok(Some(("dependentSchemas", relevant_path)));
+            }
+        }
+    }
+
+    if let Some(schema) = object.get("not") {
+        let keyword_path = child_path(path, "not");
+        if let Some(relevant_path) =
+            work_unit_effect_location(root, schema, &keyword_path, references)?
+        {
+            return Ok(Some(("not", relevant_path)));
+        }
+    }
+
+    Ok(None)
+}
+
+fn work_unit_effect_location(
+    root: &Value,
+    schema: &Value,
+    path: &str,
+    references: &mut Vec<String>,
+) -> Result<Option<String>, WorkUnitSchemaError> {
+    let object = match schema {
+        Value::Bool(_) => return Ok(None),
+        Value::Object(object) => object,
+        _ => return Err(error(path, "schema must be an object or boolean")),
+    };
+
+    if let Some((index, _)) =
+        object
+            .get("required")
+            .and_then(Value::as_array)
+            .and_then(|required| {
+                required
+                    .iter()
+                    .enumerate()
+                    .find(|(_, property)| property.as_str() == Some("work_unit"))
+            })
+    {
+        return Ok(Some(child_path(
+            &child_path(path, "required"),
+            &index.to_string(),
+        )));
+    }
+    if object
+        .get("properties")
+        .and_then(Value::as_object)
+        .is_some_and(|properties| properties.contains_key("work_unit"))
+    {
+        return Ok(Some(child_path(
+            &child_path(path, "properties"),
+            "work_unit",
+        )));
+    }
+
+    if let Some(reference) = object.get("$ref") {
+        let reference_path = child_path(path, "$ref");
+        let reference = reference
+            .as_str()
+            .ok_or_else(|| error(&reference_path, "'$ref' must be a string"))?;
+        let target = resolve_local_ref(root, reference, &reference_path, references)?;
+        references.push(reference.to_string());
+        let effect = work_unit_effect_location(root, target, reference, references);
+        references.pop();
+        if effect?.is_some() {
+            return Ok(Some(reference_path));
+        }
+    }
+
+    for keyword in ["allOf", "anyOf", "oneOf"] {
+        if let Some(value) = object.get(keyword) {
+            let composition_path = child_path(path, keyword);
+            for (index, branch) in branches(value, &composition_path)?.iter().enumerate() {
+                if let Some(relevant_path) = work_unit_effect_location(
+                    root,
+                    branch,
+                    &child_path(&composition_path, &index.to_string()),
+                    references,
+                )? {
+                    return Ok(Some(relevant_path));
+                }
+            }
+        }
+    }
+
+    if let Some((_, relevant_path)) = unsupported_work_unit_effect(root, object, path, references)?
+    {
+        return Ok(Some(relevant_path));
+    }
+
+    Ok(None)
 }
 
 fn ensure_string_property(
@@ -578,18 +715,67 @@ mod tests {
     }
 
     #[test]
-    fn conditional_dependency_and_negation_forms_fail_closed() {
-        for keyword in [
-            "if",
-            "then",
-            "else",
-            "dependentRequired",
-            "dependentSchemas",
-            "not",
-        ] {
-            let schema = json!({ keyword: { "required": ["work_unit"] } });
+    fn ownership_relevant_conditional_dependency_and_negation_forms_fail_closed() {
+        let cases = [
+            (
+                "if",
+                json!({
+                    "if": { "properties": { "work_unit": { "const": "work-unit-a" } } },
+                    "then": { "required": ["summary"] }
+                }),
+                "/if/properties/work_unit",
+            ),
+            (
+                "then",
+                json!({
+                    "if": { "required": ["kind"] },
+                    "then": { "required": ["work_unit"] }
+                }),
+                "/then/required/0",
+            ),
+            (
+                "else",
+                json!({
+                    "if": { "required": ["kind"] },
+                    "else": { "properties": { "work_unit": { "pattern": "^work-unit-" } } }
+                }),
+                "/else/properties/work_unit",
+            ),
+            (
+                "dependentRequired",
+                json!({ "dependentRequired": { "kind": ["work_unit"] } }),
+                "/dependentRequired/kind/0",
+            ),
+            (
+                "dependentRequired",
+                json!({ "dependentRequired": { "work_unit": ["kind"] } }),
+                "/dependentRequired/work_unit",
+            ),
+            (
+                "dependentSchemas",
+                json!({
+                    "dependentSchemas": {
+                        "kind": { "properties": { "work_unit": { "type": "string" } } }
+                    }
+                }),
+                "/dependentSchemas/kind/properties/work_unit",
+            ),
+            (
+                "dependentSchemas",
+                json!({ "dependentSchemas": { "work_unit": { "required": ["kind"] } } }),
+                "/dependentSchemas/work_unit",
+            ),
+            (
+                "not",
+                json!({ "not": { "properties": { "work_unit": { "const": "forbidden" } } } }),
+                "/not/properties/work_unit",
+            ),
+        ];
+
+        for (keyword, schema, expected_path) in cases {
             let error = analyze_work_unit_ownership(&schema).unwrap_err();
-            assert_eq!(error.schema_path, format!("/{keyword}"));
+            assert_eq!(error.schema_path, expected_path, "{keyword}: {error}");
+            assert!(error.detail.contains(keyword), "{error}");
         }
     }
 
@@ -633,5 +819,70 @@ mod tests {
         let error = analyze_work_unit_ownership(&schema).unwrap_err();
         assert!(error.detail.contains("external"), "{error}");
         assert!(error.schema_path.contains("$ref"), "{error}");
+    }
+
+    #[test]
+    fn unrelated_conditional_and_dependency_constructs_preserve_direct_ownership() {
+        let unrelated = [
+            (
+                "if/then/else",
+                json!({
+                    "if": { "properties": { "kind": { "const": "special" } } },
+                    "then": { "required": ["summary"] },
+                    "else": { "properties": { "summary": { "minLength": 1 } } }
+                }),
+            ),
+            (
+                "dependentRequired",
+                json!({ "dependentRequired": { "title": ["summary"] } }),
+            ),
+            (
+                "dependentSchemas",
+                json!({ "dependentSchemas": { "title": { "required": ["summary"] } } }),
+            ),
+            ("not", json!({ "not": { "required": ["forbidden"] } })),
+        ];
+        let bases = [
+            (
+                json!({
+                    "type": "object",
+                    "properties": { "title": { "type": "string" } }
+                }),
+                WorkUnitOwnership::Absent,
+            ),
+            (
+                json!({
+                    "type": "object",
+                    "properties": { "work_unit": { "type": "string" } }
+                }),
+                WorkUnitOwnership::PayloadOptional,
+            ),
+            (
+                json!({
+                    "type": "object",
+                    "properties": { "work_unit": { "type": "string" } },
+                    "required": ["work_unit"]
+                }),
+                WorkUnitOwnership::RuntimeRequired,
+            ),
+        ];
+
+        for (base, expected) in bases {
+            for (label, fragment) in &unrelated {
+                let mut schema = base.clone();
+                schema.as_object_mut().unwrap().extend(
+                    fragment
+                        .as_object()
+                        .unwrap()
+                        .iter()
+                        .map(|(key, value)| (key.clone(), value.clone())),
+                );
+                assert_eq!(
+                    analyze_work_unit_ownership(&schema).unwrap(),
+                    expected,
+                    "unrelated {label} changed ownership for {schema}"
+                );
+            }
+        }
     }
 }

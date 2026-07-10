@@ -84,6 +84,9 @@ scope persists exactly. A malformed declaration fails schema-shape validation;
 a well-formed foreign declaration fails authority validation and is never
 rewritten. Both failures occur before workspace or store persistence. Ambiguous
 schema ownership fails closed with a schema-location diagnostic.
+Conditionals, dependencies, and negation elsewhere in the artifact schema are
+irrelevant to this decision; they fail closed only when their root-object
+assertion can require, admit, or constrain `work_unit`.
 
 Every stage that reconciles the workspace re-establishes the session's scoped
 work-unit identity before evaluating readiness, serving context, or advancing

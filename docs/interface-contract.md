@@ -178,6 +178,13 @@ authority check; well-formed foreign values fail authority; complete artifact
 validation follows. Nothing is persisted until all checks pass. A schema whose
 ownership cannot be resolved safely through the supported local-reference and
 composition forms is rejected with a schema-location diagnostic.
+Unsupported conditional, dependency, and negation forms participate only when
+they can affect the root `work_unit`; unrelated uses do not change ownership.
+For example, the runtime reports:
+
+```text
+protocol 'publish' output artifact type 'report' has unresolved work_unit ownership at /not/properties/work_unit: 'not' can change work_unit ownership, admissibility, or constraints
+```
 
 **Graph computation.** runa computes the dependency graph from protocol declarations. This enables: freshness analysis (which artifacts are stale), execution ordering (what can run now), cycle detection (where the methodology creates loops), and blocked-protocol identification (what's waiting on what).
 

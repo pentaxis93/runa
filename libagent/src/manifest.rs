@@ -94,6 +94,13 @@ pub enum ManifestError {
         protocol: String,
         artifact_type: String,
     },
+    /// An output schema's work_unit ownership cannot be resolved safely.
+    OutputWorkUnitOwnershipUnresolved {
+        protocol: String,
+        artifact_type: String,
+        schema_path: String,
+        detail: String,
+    },
     /// Required output choice group name is unsafe.
     InvalidRequiredOutputChoiceName { protocol: String, choice: String },
     /// Two required output choices on one protocol share the same name.
@@ -188,6 +195,16 @@ impl fmt::Display for ManifestError {
                      remove 'work_unit' from the output schema's required fields"
                 )
             }
+            ManifestError::OutputWorkUnitOwnershipUnresolved {
+                protocol,
+                artifact_type,
+                schema_path,
+                detail,
+            } => write!(
+                f,
+                "protocol '{protocol}' output artifact type '{artifact_type}' has unresolved \
+                 work_unit ownership at {schema_path}: {detail}"
+            ),
             ManifestError::InvalidRequiredOutputChoiceName { protocol, choice } => write!(
                 f,
                 "invalid required output choice name '{choice}' in protocol '{protocol}': names must not contain '/', '\\', or '..'"
@@ -388,10 +405,20 @@ fn validate_resolved_manifest(manifest: &Manifest) -> Result<(), ManifestError> 
             };
 
             if let Err(error) = validate_output_scope(protocol, artifact_type) {
-                return Err(ManifestError::UnscopedProtocolOutputRequiresWorkUnit {
-                    protocol: error.protocol,
-                    artifact_type: error.artifact_type,
-                });
+                return match (error.schema_path, error.detail) {
+                    (Some(schema_path), Some(detail)) => {
+                        Err(ManifestError::OutputWorkUnitOwnershipUnresolved {
+                            protocol: error.protocol,
+                            artifact_type: error.artifact_type,
+                            schema_path,
+                            detail,
+                        })
+                    }
+                    _ => Err(ManifestError::UnscopedProtocolOutputRequiresWorkUnit {
+                        protocol: error.protocol,
+                        artifact_type: error.artifact_type,
+                    }),
+                };
             }
         }
     }
@@ -1260,6 +1287,75 @@ trigger = { type = "on_change", name = "implementation" }
 
         let manifest = parse(&manifest_path).unwrap();
         assert!(!manifest.protocols[0].scoped);
+    }
+
+    #[test]
+    fn parse_preserves_truthful_work_unit_ownership_diagnostics_for_every_protocol_scope() {
+        for scoped in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            write_layout(
+                dir.path(),
+                &[(
+                    "report",
+                    r#"{
+                        "type": "object",
+                        "properties": { "title": { "type": "string" } },
+                        "not": {
+                            "properties": {
+                                "work_unit": { "const": "work-unit-forbidden" }
+                            }
+                        }
+                    }"#,
+                )],
+                &["publish"],
+            );
+            let manifest_path = dir.path().join("manifest.toml");
+            std::fs::write(
+                &manifest_path,
+                format!(
+                    r#"
+name = "diagnostic"
+
+[[artifact_types]]
+name = "report"
+
+[[protocols]]
+name = "publish"
+produces = ["report"]
+scoped = {scoped}
+trigger = {{ type = "on_change", name = "report" }}
+"#
+                ),
+            )
+            .unwrap();
+
+            let error = parse(&manifest_path).unwrap_err();
+            let ManifestError::OutputWorkUnitOwnershipUnresolved {
+                protocol,
+                artifact_type,
+                schema_path,
+                detail,
+            } = &error
+            else {
+                panic!("structured ownership error was collapsed: {error:?}");
+            };
+            assert_eq!(protocol, "publish");
+            assert_eq!(artifact_type, "report");
+            assert_eq!(schema_path, "/not/properties/work_unit");
+            assert!(detail.contains("'not' can change"), "{detail}");
+
+            let rendered = error.to_string();
+            assert!(
+                rendered.contains(
+                    "protocol 'publish' output artifact type 'report' has unresolved work_unit ownership"
+                ),
+                "{rendered}"
+            );
+            assert!(rendered.contains("/not/properties/work_unit"), "{rendered}");
+            assert!(rendered.contains("'not' can change"), "{rendered}");
+            assert!(!rendered.contains("declared unscoped"), "{rendered}");
+            assert!(!rendered.contains("requires 'work_unit'"), "{rendered}");
+        }
     }
 
     #[test]

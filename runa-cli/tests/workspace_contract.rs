@@ -71,6 +71,27 @@ fn work_unit_ownership_has_one_source_and_consistent_documentation() {
 }
 
 #[test]
+fn work_unit_ownership_diagnostic_example_matches_the_runtime_message() {
+    let runtime = read_workspace_file("libagent/src/manifest.rs");
+    let interface = read_workspace_file("docs/interface-contract.md");
+    for fragment in [
+        "output artifact type '{artifact_type}' has unresolved",
+        "work_unit ownership at {schema_path}: {detail}",
+    ] {
+        assert!(
+            runtime.contains(fragment),
+            "runtime diagnostic lost {fragment}"
+        );
+    }
+    assert!(
+        interface.contains(
+            "protocol 'publish' output artifact type 'report' has unresolved work_unit ownership at /not/properties/work_unit: 'not' can change work_unit ownership, admissibility, or constraints"
+        ),
+        "interface documentation must carry a literal runtime-shaped diagnostic example"
+    );
+}
+
+#[test]
 fn cargo_release_configuration_lives_at_the_workspace_root() {
     assert!(
         workspace_root().join("release.toml").is_file(),

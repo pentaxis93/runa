@@ -103,7 +103,9 @@ Semantic Versioning.
   Omission stays cross-cutting, an explicit delegated scope persists exactly,
   and malformed or foreign declarations fail before persistence. Schemas that
   require `work_unit` retain runtime-owned injection and spoof protection;
-  stored artifacts and execution records require no migration.
+  unrelated conditional/dependency/negation forms remain admissible, while
+  ownership-relevant forms fail closed with their exact schema location.
+  Stored artifacts and execution records require no migration.
 - Live transcript capture now honors non-empty `RUNA_TRANSCRIPT_RUN_ID` and
   `RUNA_TRANSCRIPT_DEPLOYMENT` values across every `runa run` stage and child
   `runa-mcp` tool event. Absent or empty run ids still mint a non-empty

@@ -77,8 +77,10 @@ The single bounded analyzer for output `work_unit` ownership. It returns
 requiredness, resolving local JSON Pointer references with Draft 2020-12
 sibling semantics plus supported `allOf` and uniform viable `anyOf`/`oneOf`
 composition. Cycles, external or unresolved references, mixed ownership, and
-conditional/dependency/negation forms fail closed with schema-location
-diagnostics. It is deliberately not a general JSON Schema evaluator.
+conditional/dependency/negation forms that can affect the root `work_unit`
+fail closed with schema-location diagnostics; unrelated forms are ignored by
+this property-directed decision. It is deliberately not a general JSON Schema
+evaluator.
 
 ### `manifest.rs`
 
