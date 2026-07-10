@@ -394,10 +394,21 @@ impl SessionState {
         let scan_result = crate::scan(&loaded.workspace_dir, &mut loaded.store)?;
         let scan_findings = crate::collect_scan_findings(&scan_result, &loaded.workspace_dir);
 
-        // Resolve the promise first. Re-entry (the work-unit already exists)
-        // degrades to an ordinary bound session and needs no acquisition surface;
-        // only a cold start requires one.
-        if let Some(work_unit) = crate::resolve_promise(&loaded.store, &identity, &ticket)? {
+        // Resolve the promise first — resolution stays fail-closed. Re-entry
+        // (the work-unit already exists) opens as an ordinary bound session
+        // only when the acquisition surface's persisted execution record is
+        // current; a stale or absent record routes the entry through the
+        // acquisition surface exactly as a cold start, so the methodology's
+        // re-grounding discipline fires before the scoped pipeline proceeds.
+        // A methodology with no acquisition surface has no re-grounding to
+        // serve, so its re-entry stays bound.
+        let resolved = crate::resolve_promise(&loaded.store, &identity, &ticket)?;
+        let reentry_bound = resolved.is_some()
+            && match crate::discover_acquisition_surface(&loaded.manifest.protocols) {
+                Ok(acquisition) => crate::acquisition_record_current(acquisition, &loaded.store),
+                Err(_) => true,
+            };
+        if let Some(work_unit) = resolved.filter(|_| reentry_bound) {
             crate::validate_scoped_work_unit_with_identity(&loaded.store, &work_unit, &identity)?;
             let mut session = Self {
                 working_dir,
@@ -414,7 +425,10 @@ impl SessionState {
             return Ok(session);
         }
 
-        // Cold start: the acquisition surface is required.
+        // Cold start, or re-entry whose acquisition record is stale or absent:
+        // the acquisition surface is required, and the session opens promised
+        // and pinned to it. On re-entry the work-unit is already recorded, so
+        // `advance`'s bind resolves it once the acquisition step delivers.
         crate::validate_tracker_consistency(&loaded.store, &identity)?;
         let acquisition_name = crate::discover_acquisition_surface(&loaded.manifest.protocols)?
             .name
@@ -1361,14 +1375,65 @@ trigger = { type = "on_artifact", name = "work-unit" }
     }
 
     #[test]
-    fn open_entry_binds_immediately_when_work_unit_exists() {
+    fn open_entry_reentry_without_acquisition_record_serves_acquisition() {
         let _env = unset_forge_env();
         let dir = tempfile::tempdir().unwrap();
+        // The work-unit is already recorded, but the acquisition surface has no
+        // persisted execution record: the entry serves the acquisition surface
+        // so the methodology's re-grounding fires before the scoped pipeline.
         let project_dir = write_entry_project(dir.path(), true);
 
         let session =
             SessionState::open_entry(project_dir, None, ticket_14(), |_, _| Ok(())).unwrap();
 
+        let step = session
+            .current_step()
+            .expect("re-entry with a stale acquisition record serves acquisition");
+        assert_eq!(step.protocol, "decompose");
+        assert_eq!(step.work_unit, None);
+        assert!(matches!(
+            session.scope,
+            SessionScope::Promised { ticket: Some(_) }
+        ));
+    }
+
+    #[test]
+    fn reentry_acquisition_advance_binds_recorded_unit_and_next_entry_opens_bound() {
+        let _env = unset_forge_env();
+        let dir = tempfile::tempdir().unwrap();
+        let project_dir = write_entry_project(dir.path(), true);
+
+        // First entry on the recorded work-unit serves the acquisition surface.
+        let mut session =
+            SessionState::open_entry(project_dir.clone(), None, ticket_14(), |_, _| Ok(()))
+                .unwrap();
+        assert_eq!(
+            session.current_step().map(|s| s.protocol.as_str()),
+            Some("decompose")
+        );
+
+        // The acquisition step advances (the delivered work-unit is the
+        // recorded one), binds the recorded instance — no second work-unit —
+        // and persists the acquisition's execution record.
+        let advance = session
+            .advance_with_validator(|_, _| Ok(()))
+            .expect("re-entry acquisition advances and binds");
+        assert_eq!(advance.payload.completed_step.protocol, "decompose");
+        assert_eq!(
+            advance
+                .payload
+                .next_step
+                .as_ref()
+                .map(|s| s.protocol.as_str()),
+            Some("take")
+        );
+        assert!(
+            matches!(&session.scope, SessionScope::Bound(work_unit) if work_unit == "work-unit-14-cold-start")
+        );
+
+        // The persisted record makes the immediately following entry open bound.
+        let session =
+            SessionState::open_entry(project_dir, None, ticket_14(), |_, _| Ok(())).unwrap();
         let step = session.current_step().expect("bound session selects take");
         assert_eq!(step.protocol, "take");
         assert_eq!(step.work_unit.as_deref(), Some("work-unit-14-cold-start"));

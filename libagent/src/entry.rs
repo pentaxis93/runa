@@ -451,6 +451,35 @@ pub fn check_acquisition_admissible(
     Ok(())
 }
 
+/// Whether the acquisition surface's persisted execution record is current:
+/// a record exists for the unscoped acquisition and its recorded input
+/// snapshot equals the present one — the same input-freshness comparison
+/// canonical selection applies to every protocol.
+///
+/// This is the re-entry routing gate. A ticket entry that resolves to a
+/// recorded work-unit opens bound only when the acquisition surface has
+/// already executed against the present input set; otherwise the entry
+/// serves the acquisition surface, so the methodology's own re-grounding
+/// discipline fires before the scoped pipeline proceeds. The runtime
+/// consults only its own store state here — what re-grounding means is the
+/// methodology's, delivered by the acquisition protocol it already owns.
+pub fn acquisition_record_current(
+    acquisition: &ProtocolDeclaration,
+    store: &ArtifactStore,
+) -> bool {
+    match store.execution_record(&acquisition.name, None) {
+        Some(record) => {
+            let current_inputs = crate::selection::execution_input_snapshot_for_freshness_inputs(
+                store,
+                record.input_modes.iter(),
+                None,
+            );
+            record.inputs == current_inputs
+        }
+        None => false,
+    }
+}
+
 /// Resolve a ticket reference to the materialized `work-unit` instance.
 ///
 /// Returns the instance id whose tracker handle identity equals the reference,
@@ -678,6 +707,73 @@ mod tests {
             },
             instructions: None,
         }
+    }
+
+    #[test]
+    fn acquisition_record_current_is_false_without_a_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = crate::test_helpers::make_store(&tmp.path().join("store"), vec!["work-unit"]);
+        let acquisition = acquisition_protocol(&[]);
+
+        assert!(!acquisition_record_current(&acquisition, &store));
+    }
+
+    #[test]
+    fn acquisition_record_current_is_true_when_snapshot_matches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = crate::test_helpers::make_store(
+            &tmp.path().join("store"),
+            vec!["request", "work-unit"],
+        );
+        store
+            .record(
+                "request",
+                "good",
+                std::path::Path::new("good.json"),
+                &serde_json::json!({"title": "good"}),
+            )
+            .unwrap();
+        let acquisition = acquisition_protocol(&["request"]);
+        let record = crate::protocol_entry_execution_record(&acquisition, &store, None);
+        store
+            .record_execution(&acquisition.name, None, record)
+            .unwrap();
+
+        assert!(acquisition_record_current(&acquisition, &store));
+    }
+
+    #[test]
+    fn acquisition_record_current_is_false_when_a_recorded_input_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = crate::test_helpers::make_store(
+            &tmp.path().join("store"),
+            vec!["request", "work-unit"],
+        );
+        store
+            .record(
+                "request",
+                "good",
+                std::path::Path::new("good.json"),
+                &serde_json::json!({"title": "good"}),
+            )
+            .unwrap();
+        let acquisition = acquisition_protocol(&["request"]);
+        let record = crate::protocol_entry_execution_record(&acquisition, &store, None);
+        store
+            .record_execution(&acquisition.name, None, record)
+            .unwrap();
+
+        // The recorded input changes after the record was taken.
+        store
+            .record(
+                "request",
+                "good",
+                std::path::Path::new("good.json"),
+                &serde_json::json!({"title": "changed"}),
+            )
+            .unwrap();
+
+        assert!(!acquisition_record_current(&acquisition, &store));
     }
 
     #[test]
