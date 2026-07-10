@@ -656,3 +656,201 @@ fn go_matches_direct_session_surface_when_regenerating_deleted_output_with_uncha
         scoped_state_json(&direct_project_dir)
     );
 }
+
+/// A go tick whose protocol's declared procedure requires a forge mutation
+/// the forge refuses fails the tick — `work_failed` (5), the refusal named
+/// on stderr, the agent process's own zero exit recorded as it occurred, and
+/// the contract artifact never persisted — even though the agent exits 0.
+#[test]
+fn go_tick_fails_when_a_required_forge_mutation_is_refused() {
+    use std::io::{Read as _, Write as _};
+
+    let dir = tempfile::tempdir().unwrap();
+
+    // A define-shaped scoped step whose instructions require claim-work-unit.
+    let manifest_path = dir.path().join("manifest.toml");
+    fs::write(
+        &manifest_path,
+        r#"
+name = "groundwork"
+
+[[artifact_types]]
+name = "work-unit"
+
+[[artifact_types]]
+name = "contract"
+
+[[protocols]]
+name = "define"
+requires = ["work-unit"]
+produces = ["contract"]
+scoped = true
+trigger = { type = "on_artifact", name = "work-unit" }
+"#,
+    )
+    .unwrap();
+    let schemas_dir = dir.path().join("schemas");
+    fs::create_dir_all(&schemas_dir).unwrap();
+    fs::write(
+        schemas_dir.join("work-unit.schema.json"),
+        r#"{"type":"object","required":["title","description","acceptance_criteria","handle"],"properties":{"title":{"type":"string"},"description":{"type":"string"},"acceptance_criteria":{"type":"array","items":{"type":"string"}},"handle":{"type":"object","required":["id","display"],"properties":{"id":{"type":"string"},"display":{"type":"string"}}}}}"#,
+    )
+    .unwrap();
+    fs::write(
+        schemas_dir.join("contract.schema.json"),
+        r#"{"type":"object","required":["work_unit","criteria"],"properties":{"work_unit":{"type":"string"},"criteria":{"type":"array","items":{"type":"string"}}}}"#,
+    )
+    .unwrap();
+    let protocol_dir = dir.path().join("protocols/define");
+    fs::create_dir_all(&protocol_dir).unwrap();
+    fs::write(
+        protocol_dir.join("PROTOCOL.md"),
+        "# define\n\nFirst invoke the connector capability `claim-work-unit` operation.\n",
+    )
+    .unwrap();
+
+    let project_dir = dir.path().join("project");
+    fs::create_dir(&project_dir).unwrap();
+    init_project(&project_dir, &manifest_path);
+
+    // Forge stub refusing the claim.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let api_base = format!("http://{}", listener.local_addr().unwrap());
+    let stub = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 8192];
+        let _ = stream.read(&mut request).unwrap();
+        let body = r#"{"message":"Resource not accessible by integration"}"#;
+        write!(
+            stream,
+            "HTTP/1.1 403 Forbidden\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .unwrap();
+    });
+
+    let transcript_dir = dir.path().join("transcripts");
+    let config_path = project_dir.join(".runa/config.toml");
+    let existing = fs::read_to_string(&config_path).unwrap();
+    fs::write(
+        &config_path,
+        format!(
+            "{existing}\n[forge]\ntype = \"github\"\nowner = \"tesserine\"\nname = \"example\"\nassignee = \"operator\"\napi_base = \"{api_base}\"\n\n[transcript]\ndir = {:?}\n",
+            transcript_dir.display().to_string()
+        ),
+    )
+    .unwrap();
+
+    let work_unit_id = "work-unit-9";
+    let workspace = project_dir.join(".runa/workspace");
+    fs::create_dir_all(workspace.join("work-unit")).unwrap();
+    fs::write(
+        workspace.join(format!("work-unit/{work_unit_id}.json")),
+        r#"{"title":"unit","description":"unit","acceptance_criteria":["c"],"handle":{"id":"github:tesserine/example:issue:9","display":"tesserine/example#9"}}"#,
+    )
+    .unwrap();
+
+    // The agent claims (refused), attempts the contract, attempts advance,
+    // and exits 0 regardless: the protocol classification must not depend on
+    // the agent's own exit status.
+    let agent_path = dir.path().join("agent.sh");
+    let prompt_path = dir.path().join("prompt.txt");
+    let mcp_log_path = dir.path().join("mcp.log");
+    write_executable(
+        &agent_path,
+        r#"#!/bin/sh
+set -eu
+cat > "$1"
+{
+    printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"refusal-test","version":"1.0.0"}}}'
+    printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+    printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"next-protocol-context","arguments":{}}}'
+    printf '%s\n' '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"claim-work-unit","arguments":{"handle":{"id":"github:tesserine/example:issue:9","display":"tesserine/example#9"}}}}'
+    # A real MCP client awaits each tool result before the next call; the
+    # pause stands in for awaiting the claim's refusal on this raw pipe.
+    sleep 2
+    printf '%s\n' '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"contract","arguments":{"instance_id":"contract-9","criteria":["c1"]}}}'
+    printf '%s\n' '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"advance","arguments":{}}}'
+    sleep 1
+} | "$2" --session --work-unit work-unit-9 > "$3"
+exit 0
+"#,
+    );
+    let runa_mcp_path = runa_mcp_bin_path();
+    append_agent_command_config(
+        &project_dir,
+        &[&agent_path, &prompt_path, &runa_mcp_path, &mcp_log_path],
+    );
+
+    let output = runa_bin()
+        .arg("go")
+        .arg("--work-unit")
+        .arg(work_unit_id)
+        .env_remove("RUNA_FORGE_TYPE")
+        .env_remove("RUNA_FORGE_OWNER")
+        .env_remove("RUNA_FORGE_NAME")
+        .env_remove("RUNA_FORGE_TRACKER_ID")
+        .current_dir(&project_dir)
+        .output()
+        .unwrap();
+    stub.join().unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(5),
+        "a refused required mutation is a work failure; stderr: {stderr}\nmcp log: {}",
+        fs::read_to_string(&mcp_log_path).unwrap_or_else(|_| "<missing>".to_string())
+    );
+    assert!(
+        stderr.contains("required forge mutation refused"),
+        "stderr names the enforcement: {stderr}"
+    );
+    assert!(
+        stderr.contains("claim-work-unit"),
+        "stderr names the operation: {stderr}"
+    );
+    assert!(stderr.contains("403"), "stderr names the cause: {stderr}");
+    assert!(
+        stderr.contains("recorded as it occurred"),
+        "the agent process's own exit status is recorded as it occurred: {stderr}"
+    );
+
+    assert!(
+        !project_dir
+            .join(".runa/workspace/contract/contract-9.json")
+            .exists(),
+        "no contract artifact persists past the refused claim"
+    );
+
+    // Transcript: agent_exit carries the protocol failure classification.
+    let mut events = String::new();
+    collect_transcript_events_into(&transcript_dir, &mut events);
+    assert!(
+        events.contains("\"kind\":\"agent_exit\""),
+        "transcript records an agent_exit: {events}"
+    );
+    assert!(
+        events.contains("\"success\":false"),
+        "agent_exit is non-success: {events}"
+    );
+    assert!(
+        events.contains("protocol failure: required forge mutation refused"),
+        "the classification names the refusal: {events}"
+    );
+}
+
+fn collect_transcript_events_into(path: &Path, events: &mut String) {
+    let Ok(entries) = fs::read_dir(path) else {
+        return;
+    };
+    for entry in entries {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            collect_transcript_events_into(&path, events);
+        } else if path.file_name().and_then(|name| name.to_str()) == Some("events.jsonl") {
+            events.push_str(&fs::read_to_string(path).unwrap());
+        }
+    }
+}

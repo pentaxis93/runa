@@ -1,4 +1,5 @@
 mod handler;
+mod mutation_ledger;
 
 use clap::Parser;
 use libagent::configure_tracing;

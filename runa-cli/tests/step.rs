@@ -1186,8 +1186,21 @@ fn step_without_dry_run_invokes_configured_agent_with_execution_prompt() {
         mcp_config["args"],
         serde_json::json!(["--protocol", "implement"])
     );
+    let mut env = mcp_config["env"].clone();
+    let failure_receipt = env
+        .as_object_mut()
+        .unwrap()
+        .remove(libagent::PROTOCOL_FAILURE_RECEIPT_ENV)
+        .expect("execute injects the protocol-failure receipt path");
+    assert!(
+        failure_receipt
+            .as_str()
+            .unwrap()
+            .ends_with("protocol-failure.json"),
+        "{failure_receipt}"
+    );
     assert_eq!(
-        mcp_config["env"],
+        env,
         serde_json::json!({
             "RUNA_FORGE_TYPE": "github",
             "RUNA_CONFIG": project_dir.join(".runa/config.toml"),
@@ -1249,8 +1262,21 @@ fn step_without_dry_run_launches_claude_named_agent_agnostically() {
         mcp_config["args"],
         serde_json::json!(["--protocol", "implement"])
     );
+    let mut env = mcp_config["env"].clone();
+    let failure_receipt = env
+        .as_object_mut()
+        .unwrap()
+        .remove(libagent::PROTOCOL_FAILURE_RECEIPT_ENV)
+        .expect("execute injects the protocol-failure receipt path");
+    assert!(
+        failure_receipt
+            .as_str()
+            .unwrap()
+            .ends_with("protocol-failure.json"),
+        "{failure_receipt}"
+    );
     assert_eq!(
-        mcp_config["env"],
+        env,
         serde_json::json!({
             "RUNA_FORGE_TYPE": "github",
             "RUNA_CONFIG": project_dir.join(".runa/config.toml"),

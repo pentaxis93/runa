@@ -207,6 +207,46 @@ Any driver path that hand-rolls readiness, context construction, artifact
 recording, or lifecycle transition logic is outside this contract. The valid
 interactive path is through runa's surface, not around it.
 
+## Required-Forge-Mutation Contract
+
+A protocol reports success only when every forge mutation its declared
+procedure requires has been performed. The set of required mutations is
+consulted from the methodology's own procedure authority — the protocol's
+structured workflow contract (`workflow-contracts/{protocol}.toml`) when the
+methodology publishes one, the protocol instructions otherwise — matched
+against the canonical forge operation set. Runa enumerates no operation
+list of its own, so a mutation added to the declaring authority comes under
+enforcement without a runa change.
+
+When the forge refuses a required mutation — an authorization refusal, a
+rate limit, a network fault, a provider error — the protocol fails at that
+boundary:
+
+- The refusing tool call returns an error naming the failed operation and
+  the connector's transport cause verbatim, so the operator reads the cause
+  at the surface rather than reconstructing it from event order.
+- The step's artifact output tools and session `advance` are blocked; the
+  step cannot be advanced or completed past the refusal.
+- The refusal is receipted, and the CLI classifies the protocol run as
+  failed (`work_failed`) regardless of the agent process's own exit status.
+  The agent's actual exit status is recorded in the transcript as it
+  occurred; the `agent_exit` event carries the protocol's failure
+  classification.
+- A malformed call (invalid input, unknown tool) is not a refusal: the
+  agent corrects and reissues it, and the protocol is unaffected.
+
+Tracker-backed work-unit delivery additionally carries per-run provenance:
+a first-delivery `work-unit` artifact is accepted only when its `handle`
+was returned by a successful `create-work-unit` in the same protocol run
+and its instance id is the stable derivation from that handle's id; a
+refinement carries the existing handle through unchanged and never invokes
+`create-work-unit`.
+
+Completing a required mutation through a route outside the connector — a
+local credential path, a manual write — does not satisfy the contract: the
+protocol fails at the refusal boundary even where the state is subsequently
+achieved by other means.
+
 ## Relationship to Methodology Contracts
 
 Methodologies own artifact types, schemas, protocol declarations, trigger

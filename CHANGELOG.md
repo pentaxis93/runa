@@ -9,6 +9,22 @@ Semantic Versioning.
 
 ### Added
 
+- **Required forge mutations fail their protocol when refused**
+  (tesserine/runa#244): a protocol whose declared procedure requires a forge
+  mutation reports success only if that mutation succeeded. The required set
+  is consulted from the methodology's procedure authority (workflow-contract
+  mechanics when published, protocol instructions otherwise) against the
+  canonical operation set — runa enumerates no guarded-operation list of its
+  own. A refused required mutation returns an error naming the operation and
+  transport cause, blocks the step's artifact delivery and session `advance`,
+  and is receipted so the CLI classifies the run `work_failed` regardless of
+  the agent process's own exit status (which the transcript records as it
+  occurred). Tracker-backed `work-unit` delivery carries per-run provenance:
+  first delivery requires a handle returned by a same-run `create-work-unit`
+  and the instance id derived from it; refinement carries the existing handle
+  through unchanged and never invokes `create-work-unit`. Operator contract:
+  `docs/session-surface-contract.md` §Required-Forge-Mutation Contract.
+
 - **`read-work-unit` returns the work-unit comment log** per forge-capability
   `2.0.0` (tesserine/commons#106; contract constants re-pinned to
   `e75e211`'s immutable v2 schema URL): the work-unit snapshot carries an

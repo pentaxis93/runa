@@ -485,6 +485,18 @@ impl SessionState {
         self.current_step.as_ref()
     }
 
+    /// The forge ticket this session was opened from, when the session runs
+    /// in a ticket-promised scope — the acquisition path, where the delivered
+    /// work-unit adopts the ticket's identity rather than creating one.
+    pub fn promised_ticket(&self) -> Option<&crate::TicketRef> {
+        match &self.scope {
+            SessionScope::Promised {
+                ticket: Some(ticket),
+            } => Some(ticket),
+            _ => None,
+        }
+    }
+
     pub fn current_protocol(&self) -> Result<&crate::ProtocolDeclaration, SessionError> {
         let current = self
             .current_step

@@ -27,6 +27,7 @@ pub mod manifest;
 pub mod model;
 pub mod project;
 pub mod projection;
+pub mod protocol_failure;
 pub mod scan;
 pub mod scoped_identity;
 pub mod selection;
@@ -62,6 +63,7 @@ pub use project::{
 pub use projection::{
     ProjectionCandidate, ProjectionClass, project_cascade, project_entry_cascade,
 };
+pub use protocol_failure::{PROTOCOL_FAILURE_RECEIPT_ENV, ProtocolFailureReceipt};
 pub use scan::{
     ArtifactRef, InvalidArtifact, MalformedArtifact, PartiallyScannedType, ScanError, ScanResult,
     UnreadableArtifact, scan,

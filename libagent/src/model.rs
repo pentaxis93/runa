@@ -143,6 +143,15 @@ pub struct ProtocolDeclaration {
     /// `None` when produced by `manifest::from_str` (no filesystem access).
     #[serde(skip)]
     pub instructions: Option<String>,
+    /// Mechanic handles declared by the protocol's structured workflow
+    /// contract (`workflow-contracts/{protocol_name}.toml` beside the
+    /// manifest), when the methodology publishes one. Loaded by
+    /// `manifest::parse`; `None` when the file is absent or when produced
+    /// by `manifest::from_str` (no filesystem access). When present, this
+    /// is the structured procedure authority; when absent, the protocol's
+    /// `instructions` prose remains the declaring authority.
+    #[serde(skip)]
+    pub workflow_mechanics: Option<Vec<String>>,
 }
 
 impl ProtocolDeclaration {
@@ -247,6 +256,7 @@ mod tests {
                 name: "constraints".into(),
             },
             instructions: None,
+            workflow_mechanics: None,
         };
         let json = serde_json::to_string(&protocol).unwrap();
         let deserialized: ProtocolDeclaration = serde_json::from_str(&json).unwrap();
@@ -342,6 +352,7 @@ mod tests {
                 name: "constraints".into(),
             },
             instructions: None,
+            workflow_mechanics: None,
         };
         let json = serde_json::to_string(&protocol).unwrap();
         let deserialized: ProtocolDeclaration = serde_json::from_str(&json).unwrap();
@@ -423,6 +434,7 @@ mod tests {
                 name: "draft".into(),
             },
             instructions: None,
+            workflow_mechanics: None,
         };
         let artifact_type = ArtifactType {
             name: "implementation".into(),
@@ -455,6 +467,7 @@ mod tests {
                 name: "draft".into(),
             },
             instructions: None,
+            workflow_mechanics: None,
         };
         let artifact_type = ArtifactType {
             name: "summary".into(),

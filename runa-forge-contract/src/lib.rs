@@ -44,6 +44,26 @@ impl Operation {
             Operation::CloseOut => "close-out",
         }
     }
+
+    /// Resolve a canonical operation name back to its `Operation`.
+    ///
+    /// The canonical name set is this crate's — vendored from the commons
+    /// forge-capability schema — so consumers match names against it here
+    /// rather than keeping a second list of operation names.
+    pub fn from_canonical_name(name: &str) -> Option<Operation> {
+        Operation::ALL
+            .into_iter()
+            .find(|operation| operation.canonical_name() == name)
+    }
+
+    /// Whether this operation mutates forge state.
+    ///
+    /// Semantic metadata at the operation set's single home: `read-work-unit`
+    /// is the capability's read surface; every other canonical operation
+    /// writes tracker or change state on the forge.
+    pub const fn is_mutation(self) -> bool {
+        !matches!(self, Operation::ReadWorkUnit)
+    }
 }
 
 impl fmt::Display for Operation {
@@ -453,3 +473,30 @@ impl fmt::Display for ForgeError {
 }
 
 impl std::error::Error for ForgeError {}
+
+#[cfg(test)]
+mod operation_semantics_tests {
+    use super::Operation;
+
+    #[test]
+    fn every_canonical_name_round_trips_through_from_canonical_name() {
+        for operation in Operation::ALL {
+            assert_eq!(
+                Operation::from_canonical_name(operation.canonical_name()),
+                Some(operation)
+            );
+        }
+        assert_eq!(Operation::from_canonical_name("not-an-operation"), None);
+    }
+
+    #[test]
+    fn read_work_unit_is_the_sole_read_only_operation() {
+        for operation in Operation::ALL {
+            assert_eq!(
+                operation.is_mutation(),
+                operation != Operation::ReadWorkUnit,
+                "operation {operation} mutation classification"
+            );
+        }
+    }
+}
