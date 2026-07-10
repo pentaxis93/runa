@@ -393,6 +393,7 @@ mod tests {
                 name: "constraints".into(),
             },
             instructions: None,
+            workflow_mechanics: None,
         }
     }
 
@@ -481,6 +482,7 @@ mod tests {
                 name: "constraints".into(),
             },
             instructions: Some("# implement\n".into()),
+            workflow_mechanics: None,
         };
 
         let context = build_context(&protocol, &store, None);
@@ -555,6 +557,7 @@ mod tests {
                 name: "constraints".into(),
             },
             instructions: None,
+            workflow_mechanics: None,
         };
 
         let context = build_context(&protocol, &store, None);
@@ -662,6 +665,7 @@ mod tests {
                 name: "constraints".into(),
             },
             instructions: None,
+            workflow_mechanics: None,
         };
 
         // Scoped to WU-A: sees a1 + shared, not b1.

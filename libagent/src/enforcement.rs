@@ -422,6 +422,7 @@ mod tests {
             scoped: false,
             trigger: TriggerCondition::OnChange { name: name.into() },
             instructions: None,
+            workflow_mechanics: None,
         }
     }
 

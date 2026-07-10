@@ -117,6 +117,12 @@ pub enum ManifestError {
         protocol: String,
         artifact_type: String,
     },
+    /// A workflow contract exists at its conventional location but cannot be read as one.
+    WorkflowContractInvalid {
+        protocol: String,
+        path: PathBuf,
+        detail: String,
+    },
 }
 
 impl fmt::Display for ManifestError {
@@ -217,6 +223,15 @@ impl fmt::Display for ManifestError {
                 f,
                 "protocol '{protocol}' declares artifact type '{artifact_type}' in more than one output edge"
             ),
+            ManifestError::WorkflowContractInvalid {
+                protocol,
+                path,
+                detail,
+            } => write!(
+                f,
+                "workflow contract for protocol '{protocol}' at {} is invalid: {detail}",
+                path.display()
+            ),
         }
     }
 }
@@ -313,7 +328,52 @@ fn resolve_methodology_layout(
         protocol.instructions = Some(content);
     }
 
+    // Workflow contracts: workflow-contracts/{protocol_name}.toml (optional).
+    // When present, the contract's node mechanics are the protocol's
+    // structured procedure authority; absence leaves the instructions prose
+    // as the declaring authority.
+    for protocol in &mut manifest.protocols {
+        let contract_path = manifest_dir
+            .join("workflow-contracts")
+            .join(format!("{}.toml", protocol.name));
+        let content = match std::fs::read_to_string(&contract_path) {
+            Ok(content) => content,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(ManifestError::Io(e)),
+        };
+        let contract: WorkflowContractMechanics =
+            toml::from_str(&content).map_err(|e| ManifestError::WorkflowContractInvalid {
+                protocol: protocol.name.clone(),
+                path: contract_path,
+                detail: e.to_string(),
+            })?;
+        let mut mechanics: Vec<String> = Vec::new();
+        for node in contract.nodes {
+            for mechanic in node.mechanics {
+                if !mechanics.contains(&mechanic) {
+                    mechanics.push(mechanic);
+                }
+            }
+        }
+        protocol.workflow_mechanics = Some(mechanics);
+    }
+
     Ok(())
+}
+
+/// The slice of a workflow contract this crate consults: each node's
+/// mechanic handles. The contract's full shape is groundwork's; only the
+/// mechanics referenced by procedure nodes are read here.
+#[derive(serde::Deserialize)]
+struct WorkflowContractMechanics {
+    #[serde(default, rename = "nodes")]
+    nodes: Vec<WorkflowContractNode>,
+}
+
+#[derive(serde::Deserialize)]
+struct WorkflowContractNode {
+    #[serde(default)]
+    mechanics: Vec<String>,
 }
 
 fn validate_resolved_manifest(manifest: &Manifest) -> Result<(), ManifestError> {
@@ -377,6 +437,7 @@ pub fn from_str(content: &str) -> Result<Manifest, ManifestError> {
                 scoped: r.scoped,
                 trigger: r.trigger,
                 instructions: None,
+                workflow_mechanics: None,
             })
             .collect(),
     };
@@ -800,6 +861,93 @@ trigger = { type = "on_change", name = "report" }
         // Instruction content loaded from convention path.
         let instructions = manifest.protocols[0].instructions.as_ref().unwrap();
         assert_eq!(instructions, "# generate\n");
+
+        // No workflow contract published: prose stays the declaring authority.
+        assert_eq!(manifest.protocols[0].workflow_mechanics, None);
+    }
+
+    #[test]
+    fn parse_resolves_workflow_contract_mechanics_when_published() {
+        let dir = tempfile::tempdir().unwrap();
+        write_layout(
+            dir.path(),
+            &[("report", r#"{"type": "object"}"#)],
+            &["generate"],
+        );
+        let contracts_dir = dir.path().join("workflow-contracts");
+        std::fs::create_dir_all(&contracts_dir).unwrap();
+        std::fs::write(
+            contracts_dir.join("generate.toml"),
+            r#"
+name = "generate"
+
+[[nodes]]
+name = "gather"
+mechanics = ["read-artifact", "publish-report"]
+
+[[nodes]]
+name = "publish"
+mechanics = ["publish-report"]
+"#,
+        )
+        .unwrap();
+
+        let toml = r#"
+name = "test-methodology"
+
+[[artifact_types]]
+name = "report"
+
+[[protocols]]
+name = "generate"
+produces = ["report"]
+trigger = { type = "on_change", name = "report" }
+"#;
+        let manifest_path = dir.path().join("manifest.toml");
+        std::fs::write(&manifest_path, toml).unwrap();
+
+        let manifest = parse(&manifest_path).unwrap();
+        assert_eq!(
+            manifest.protocols[0].workflow_mechanics,
+            Some(vec![
+                "read-artifact".to_string(),
+                "publish-report".to_string()
+            ]),
+            "node mechanics union, in first-appearance order, without duplicates"
+        );
+    }
+
+    #[test]
+    fn parse_rejects_unreadable_workflow_contract() {
+        let dir = tempfile::tempdir().unwrap();
+        write_layout(
+            dir.path(),
+            &[("report", r#"{"type": "object"}"#)],
+            &["generate"],
+        );
+        let contracts_dir = dir.path().join("workflow-contracts");
+        std::fs::create_dir_all(&contracts_dir).unwrap();
+        std::fs::write(contracts_dir.join("generate.toml"), "not = [valid toml").unwrap();
+
+        let toml = r#"
+name = "test-methodology"
+
+[[artifact_types]]
+name = "report"
+
+[[protocols]]
+name = "generate"
+produces = ["report"]
+trigger = { type = "on_change", name = "report" }
+"#;
+        let manifest_path = dir.path().join("manifest.toml");
+        std::fs::write(&manifest_path, toml).unwrap();
+
+        let error = parse(&manifest_path).unwrap_err();
+        assert!(
+            matches!(error, ManifestError::WorkflowContractInvalid { ref protocol, .. } if protocol == "generate"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

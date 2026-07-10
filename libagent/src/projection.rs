@@ -814,6 +814,7 @@ mod tests {
             scoped: false,
             trigger,
             instructions: None,
+            workflow_mechanics: None,
         }
     }
 

@@ -41,6 +41,13 @@ pub enum StepError {
         protocol: String,
         work_unit: Option<String>,
     },
+    RequiredForgeMutationRefused {
+        protocol: String,
+        work_unit: Option<String>,
+        operation: String,
+        cause: String,
+        agent_status: String,
+    },
     PostExecutionScan {
         protocol: String,
         work_unit: Option<String>,
@@ -115,6 +122,23 @@ impl fmt::Display for StepError {
                     "agent command '{command}' failed for protocol '{protocol}': {status}"
                 ),
             },
+            StepError::RequiredForgeMutationRefused {
+                protocol,
+                work_unit,
+                operation,
+                cause,
+                agent_status,
+            } => {
+                let scope = match work_unit {
+                    Some(work_unit) => format!("protocol '{protocol}' (work_unit={work_unit})"),
+                    None => format!("protocol '{protocol}'"),
+                };
+                write!(
+                    f,
+                    "{scope} failed: required forge mutation refused: {operation}: {cause} \
+                     (agent process exit status recorded as it occurred: {agent_status})"
+                )
+            }
             StepError::SessionDidNotAdvance {
                 protocol,
                 work_unit,
@@ -186,6 +210,7 @@ impl std::error::Error for StepError {
             StepError::AgentCommandIo { source, .. } => Some(source),
             StepError::AgentCommandFailed { .. } => None,
             StepError::SessionDidNotAdvance { .. } => None,
+            StepError::RequiredForgeMutationRefused { .. } => None,
             StepError::PostExecutionScan { source, .. } => Some(source),
             StepError::PostExecutionEnforcement { source, .. } => Some(source),
             StepError::PostExecutionRecord { source, .. } => Some(source),
@@ -213,6 +238,10 @@ impl StepError {
             StepError::AgentCommandFailed { .. } => ExitCode::InfrastructureFailure,
             StepError::PostExecutionEnforcement { .. } => ExitCode::WorkFailed,
             StepError::SessionDidNotAdvance { .. } => ExitCode::WorkFailed,
+            // The agent ran; the protocol's declared procedure required a
+            // forge mutation the forge refused, so the protocol's completion
+            // condition is unmet regardless of the agent's own exit status.
+            StepError::RequiredForgeMutationRefused { .. } => ExitCode::WorkFailed,
             StepError::TicketReference(err) => match err {
                 libagent::EntryError::InvalidReference { .. }
                 | libagent::EntryError::MissingDeploymentIdentity { .. }
@@ -492,6 +521,25 @@ pub(crate) fn execute_entry(
     for (name, value) in libagent::transcript::transcript_env_from_settings(&transcript_settings) {
         mcp_config.env.insert(name, value);
     }
+    // Protocol-failure receipt: the MCP server records a refused required
+    // forge mutation at this path; after the agent exits, its presence
+    // classifies the protocol run as failed regardless of the agent
+    // process's own exit status.
+    let failure_receipt_dir = tempfile::Builder::new()
+        .prefix("runa-protocol-failure-")
+        .tempdir()
+        .map_err(|source| StepError::AgentCommandIo {
+            command: command_display.clone(),
+            stage: "protocol_failure_receipt_create",
+            source,
+        })?;
+    let failure_receipt_path =
+        libagent::protocol_failure::receipt_path_in(failure_receipt_dir.path());
+    let failure_receipt_env = failure_receipt_path.to_string_lossy().into_owned();
+    mcp_config.env.insert(
+        libagent::PROTOCOL_FAILURE_RECEIPT_ENV.to_string(),
+        failure_receipt_env.clone(),
+    );
     child
         .args(&agent_command[1..])
         .env(
@@ -502,6 +550,7 @@ pub(crate) fn execute_entry(
     for (name, value) in libagent::transcript::transcript_env_from_settings(&transcript_settings) {
         child.env(name, value);
     }
+    child.env(libagent::PROTOCOL_FAILURE_RECEIPT_ENV, &failure_receipt_env);
     child.current_dir(working_dir).stdin(Stdio::piped());
     if transcript_capture_enabled {
         child.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -590,6 +639,70 @@ pub(crate) fn execute_entry(
     if let Some((stdout_forwarder, stderr_forwarder)) = stream_forwarders {
         finish_stream_forwarder(stdout_forwarder, &command_display)?;
         finish_stream_forwarder(stderr_forwarder, &command_display)?;
+    }
+
+    let protocol_failure = libagent::protocol_failure::read_receipt(&failure_receipt_path)
+        .map_err(|source| StepError::AgentCommandIo {
+            command: command_display.clone(),
+            stage: "protocol_failure_receipt_read",
+            source,
+        })?;
+
+    if let Some(receipt) = protocol_failure {
+        // The protocol fails on the refused required mutation. The agent
+        // process's own exit status is recorded as it occurred in the event
+        // content; the agent_exit classification carries the protocol's
+        // failure, with a synthetic non-zero code when the process itself
+        // exited zero.
+        let agent_status = format_exit_status(status);
+        let content = format!(
+            "protocol failure: {}; agent process exit status recorded as it \
+             occurred: {agent_status}",
+            receipt.describe()
+        );
+        if transcript_capture_enabled {
+            libagent::transcript::append_event_with_settings(
+                libagent::transcript::TranscriptEvent {
+                    source: "runa",
+                    kind: "agent_exit",
+                    protocol: Some(&entry.protocol),
+                    work_unit: entry.work_unit.as_deref(),
+                    exit_code: Some(
+                        status
+                            .code()
+                            .filter(|code| *code != 0)
+                            .unwrap_or_else(|| ExitCode::WorkFailed.code()),
+                    ),
+                    success: Some(false),
+                    content: Some(&content),
+                    ..Default::default()
+                },
+                &transcript_settings,
+            )
+            .map_err(|source| StepError::AgentCommandIo {
+                command: command_display.clone(),
+                stage: "transcript_write",
+                source,
+            })?;
+        }
+        warn!(
+            operation = "agent_execution",
+            outcome = "protocol_failure",
+            protocol = %entry.protocol,
+            work_unit = ?entry.work_unit,
+            command = %command_display,
+            forge_operation = %receipt.operation,
+            cause = %receipt.cause,
+            agent_status = %agent_status,
+            "required forge mutation refused; protocol fails"
+        );
+        return Err(StepError::RequiredForgeMutationRefused {
+            protocol: entry.protocol.clone(),
+            work_unit: entry.work_unit.clone(),
+            operation: receipt.operation,
+            cause: receipt.cause,
+            agent_status,
+        });
     }
 
     if transcript_capture_enabled {

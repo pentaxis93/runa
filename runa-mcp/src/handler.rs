@@ -16,6 +16,11 @@ use libagent::{
 };
 use runa_forge_compose::ForgeRuntime;
 
+use crate::mutation_ledger::{
+    HandleProvenance, MutationLedger, RecordedRefusal, StepKey, is_refusal,
+    required_forge_mutations, schema_declares_handle, verify_handle_provenance,
+};
+
 const DRIVER_TOOL_NAMES: [&str; 3] = ["readiness", "next-protocol-context", "advance"];
 
 pub struct RunaHandler {
@@ -28,6 +33,10 @@ pub struct RunaHandler {
     tool_schemas: HashMap<String, Value>,
     session: Option<Mutex<SessionState>>,
     forge_runtime: Option<Arc<ForgeRuntime>>,
+    /// Per-run forge mutation state for the current protocol step: recorded
+    /// mutation successes (delivery provenance) and the first refusal of a
+    /// required mutation (which fails the step).
+    ledger: Mutex<MutationLedger>,
 }
 
 struct HandlerState {
@@ -54,6 +63,7 @@ impl RunaHandler {
             tool_schemas,
             session: None,
             forge_runtime: forge_runtime.map(Arc::new),
+            ledger: Mutex::new(MutationLedger::default()),
         }
     }
 
@@ -88,7 +98,58 @@ impl RunaHandler {
             tool_schemas: HashMap::new(),
             session: Some(Mutex::new(session)),
             forge_runtime: forge_runtime.map(Arc::new),
+            ledger: Mutex::new(MutationLedger::default()),
         })
+    }
+
+    /// The current protocol step and the forge mutations its declared
+    /// procedure requires, read from the live declaration — the fixed
+    /// protocol, or the session's current step's protocol.
+    fn current_step_and_required_mutations(
+        &self,
+    ) -> (
+        Option<StepKey>,
+        std::collections::BTreeSet<runa_forge_contract::Operation>,
+    ) {
+        if let Some(session) = &self.session {
+            let session = session.lock().unwrap();
+            let Some(step) = session.current_step().cloned() else {
+                return (None, Default::default());
+            };
+            let required = session
+                .current_protocol()
+                .map(required_forge_mutations)
+                .unwrap_or_default();
+            return (
+                Some(StepKey {
+                    protocol: step.protocol,
+                    work_unit: step.work_unit,
+                }),
+                required,
+            );
+        }
+        let Some(protocol) = &self.protocol else {
+            return (None, Default::default());
+        };
+        (
+            Some(StepKey {
+                protocol: protocol.name.clone(),
+                work_unit: self.work_unit.clone(),
+            }),
+            required_forge_mutations(protocol),
+        )
+    }
+
+    /// The step's recorded refusal, aligned to the current step first so a
+    /// step change (only reachable through a successful advance) resets the
+    /// run-local state.
+    fn aligned_refusal(&self) -> Option<RecordedRefusal> {
+        let (step, _) = self.current_step_and_required_mutations();
+        let mut ledger = self.ledger.lock().unwrap();
+        if let Some(step) = step {
+            ledger.align_to_step(step);
+        }
+        ledger.refusal().cloned()
     }
 
     async fn call_forge_tool(
@@ -97,9 +158,8 @@ impl RunaHandler {
         input: Value,
     ) -> Option<Result<CallToolResult, McpError>> {
         let runtime = self.forge_runtime.as_ref()?.clone();
-        if !runtime.tools.contains_key(tool_name) {
-            return None;
-        }
+        let operation = runtime.tools.get(tool_name).map(|tool| tool.operation)?;
+        let (step, required_mutations) = self.current_step_and_required_mutations();
         let (protocol, work_unit) = self.transcript_context();
         let tool_name = tool_name.to_string();
         if let Err(error) = append_tool_event_with_context(
@@ -116,20 +176,30 @@ impl RunaHandler {
         let output =
             tokio::task::spawn_blocking(move || runtime.call_tool(&dispatch_tool_name, input))
                 .await;
-        Some((|| match output {
-            Err(error) => {
-                let message = format!("forge dispatch task failed: {error}");
-                append_tool_event_with_context(
-                    "tool_result",
-                    protocol.as_deref(),
-                    work_unit.as_deref(),
-                    &tool_name,
+        Some((|| {
+            // Normalize the two failure surfaces into (cause, is_refusal);
+            // a dispatch-task fault means the mutation did not happen for a
+            // reason no corrected call fixes, so it classifies as a refusal.
+            let (payload, refused_cause) = match output {
+                Ok(Ok(payload)) => (Some(payload), None),
+                Ok(Err(error)) => {
+                    let refused = is_refusal(&error);
+                    (None, Some((error.to_string(), refused)))
+                }
+                Err(error) => (
                     None,
-                    Some(&message),
-                )?;
-                Ok(CallToolResult::error(vec![Content::text(message)]))
-            }
-            Ok(Ok(payload)) => {
+                    Some((format!("forge dispatch task failed: {error}"), true)),
+                ),
+            };
+
+            if let Some(payload) = payload {
+                {
+                    let mut ledger = self.ledger.lock().unwrap();
+                    if let Some(step) = step {
+                        ledger.align_to_step(step);
+                    }
+                    ledger.record_success(operation, payload.clone());
+                }
                 let (result, content) = json_tool_result_with_content(&payload)?;
                 append_tool_event_with_context(
                     "tool_result",
@@ -139,20 +209,51 @@ impl RunaHandler {
                     None,
                     Some(&content),
                 )?;
-                Ok(result)
+                return Ok(result);
             }
-            Ok(Err(error)) => {
-                let message = error.to_string();
-                append_tool_event_with_context(
-                    "tool_result",
-                    protocol.as_deref(),
-                    work_unit.as_deref(),
-                    &tool_name,
-                    None,
-                    Some(&message),
-                )?;
-                Ok(CallToolResult::error(vec![Content::text(message)]))
-            }
+
+            let (cause, refused) = refused_cause.expect("non-payload arm carries a cause");
+            let message =
+                if refused && operation.is_mutation() && required_mutations.contains(&operation) {
+                    let refusal = RecordedRefusal {
+                        operation,
+                        tool: tool_name.clone(),
+                        cause,
+                    };
+                    {
+                        let mut ledger = self.ledger.lock().unwrap();
+                        if let Some(step) = step.clone() {
+                            ledger.align_to_step(step);
+                        }
+                        ledger.record_refusal(refusal.clone());
+                    }
+                    if let Some(step) = &step
+                        && let Err(error) = libagent::protocol_failure::write_receipt_from_env(
+                            &refusal.receipt(step),
+                        )
+                    {
+                        return Err(McpError::internal_error(
+                            format!("failed to write protocol-failure receipt: {error}"),
+                            None,
+                        ));
+                    }
+                    format!(
+                        "{}; the protocol's declared procedure requires this mutation, \
+                     so the protocol fails at this boundary",
+                        refusal.describe()
+                    )
+                } else {
+                    cause
+                };
+            append_tool_event_with_context(
+                "tool_result",
+                protocol.as_deref(),
+                work_unit.as_deref(),
+                &tool_name,
+                None,
+                Some(&message),
+            )?;
+            Ok(CallToolResult::error(vec![Content::text(message)]))
         })())
     }
 
@@ -319,6 +420,21 @@ impl RunaHandler {
                         .map(|arguments| Value::Object(arguments.clone())),
                     None,
                 )?;
+                if let Some(refusal) = self.aligned_refusal() {
+                    let message = format!(
+                        "protocol failed: {}; the step cannot advance past a \
+                         refused required forge mutation",
+                        refusal.describe()
+                    );
+                    append_session_driver_event(
+                        "tool_result",
+                        current_step.as_ref(),
+                        tool_name,
+                        None,
+                        Some(&message),
+                    )?;
+                    return Ok(CallToolResult::error(vec![Content::text(message)]));
+                }
                 let result = {
                     let mut session = session.lock().unwrap();
                     session
@@ -378,6 +494,7 @@ impl RunaHandler {
             _ => {}
         }
 
+        let refusal_gate = self.aligned_refusal();
         let mut session = session.lock().unwrap();
         let current_step = session
             .current_step()
@@ -395,6 +512,22 @@ impl RunaHandler {
                 .map(|arguments| Value::Object(arguments.clone())),
             None,
         )?;
+
+        if let Some(refusal) = refusal_gate {
+            let message = format!(
+                "protocol failed: {}; artifact delivery is blocked for this step",
+                refusal.describe()
+            );
+            append_tool_event(
+                "tool_result",
+                &protocol_name,
+                current_step.work_unit.as_deref(),
+                tool_name,
+                None,
+                Some(&message),
+            )?;
+            return Ok(CallToolResult::error(vec![Content::text(message)]));
+        }
 
         let (_, schemas) = session_tools_and_schemas(&session)
             .map_err(|error| McpError::internal_error(error, None))?;
@@ -433,6 +566,33 @@ impl RunaHandler {
             return Ok(CallToolResult::error(vec![Content::text(msg)]));
         }
 
+        if schema_declares_handle(full_schema) {
+            let existing_handle = stored_handle(session.store(), tool_name, &instance_id)?;
+            let entry_adoption = session.promised_ticket().is_some();
+            let outcome = {
+                let ledger = self.ledger.lock().unwrap();
+                verify_handle_provenance(
+                    &ledger,
+                    tool_name,
+                    &instance_id,
+                    &data,
+                    existing_handle.as_ref(),
+                    entry_adoption,
+                )
+            };
+            if let HandleProvenance::Refused(reason) = outcome {
+                append_tool_event(
+                    "tool_result",
+                    &protocol_name,
+                    current_step.work_unit.as_deref(),
+                    tool_name,
+                    None,
+                    Some(&reason),
+                )?;
+                return Ok(CallToolResult::error(vec![Content::text(reason)]));
+            }
+        }
+
         let type_dir = session.workspace_dir().join(tool_name);
         std::fs::create_dir_all(&type_dir).map_err(|e| {
             McpError::internal_error(format!("failed to create directory: {e}"), None)
@@ -459,6 +619,40 @@ impl RunaHandler {
         )?;
         Ok(CallToolResult::success(vec![Content::text(message)]))
     }
+}
+
+/// The `handle` previously delivered under `(artifact_type, instance_id)`,
+/// read from the recorded artifact's own body — `None` when no artifact is
+/// recorded there, which marks the delivery as a first delivery.
+fn stored_handle(
+    store: &ArtifactStore,
+    artifact_type: &str,
+    instance_id: &str,
+) -> Result<Option<Value>, McpError> {
+    let Some(state) = store.get(artifact_type, instance_id) else {
+        return Ok(None);
+    };
+    let content = std::fs::read_to_string(&state.path).map_err(|error| {
+        McpError::internal_error(
+            format!(
+                "failed to read recorded artifact {artifact_type}/{instance_id} \
+                 at {}: {error}",
+                state.path.display()
+            ),
+            None,
+        )
+    })?;
+    let body: Value = serde_json::from_str(&content).map_err(|error| {
+        McpError::internal_error(
+            format!(
+                "recorded artifact {artifact_type}/{instance_id} at {} is not \
+                 valid JSON: {error}",
+                state.path.display()
+            ),
+            None,
+        )
+    })?;
+    Ok(body.get("handle").cloned())
 }
 
 fn write_session_advance_receipt(payload: &libagent::AdvanceOutcome) -> std::io::Result<()> {
@@ -979,6 +1173,22 @@ impl ServerHandler for RunaHandler {
             None,
         )?;
 
+        if let Some(refusal) = self.aligned_refusal() {
+            let message = format!(
+                "protocol failed: {}; artifact delivery is blocked for this step",
+                refusal.describe()
+            );
+            append_tool_event(
+                "tool_result",
+                &protocol.name,
+                self.work_unit.as_deref(),
+                &tool_name,
+                None,
+                Some(&message),
+            )?;
+            return Ok(CallToolResult::error(vec![Content::text(message)]));
+        }
+
         // Look up the full schema for this artifact type.
         let full_schema = self
             .tool_schemas
@@ -1044,6 +1254,41 @@ impl ServerHandler for RunaHandler {
                 Some(&msg),
             )?;
             return Ok(CallToolResult::error(vec![Content::text(msg)]));
+        }
+
+        if schema_declares_handle(full_schema) {
+            let existing_handle = {
+                let state = self
+                    .state
+                    .as_ref()
+                    .expect("fixed protocol handler must have state")
+                    .lock()
+                    .unwrap();
+                stored_handle(&state.store, &tool_name, &instance_id)?
+            };
+            let entry_adoption = std::env::var_os(libagent::RUNA_ENTRY_TICKET).is_some();
+            let outcome = {
+                let ledger = self.ledger.lock().unwrap();
+                verify_handle_provenance(
+                    &ledger,
+                    &tool_name,
+                    &instance_id,
+                    &data,
+                    existing_handle.as_ref(),
+                    entry_adoption,
+                )
+            };
+            if let HandleProvenance::Refused(reason) = outcome {
+                append_tool_event(
+                    "tool_result",
+                    &protocol.name,
+                    self.work_unit.as_deref(),
+                    &tool_name,
+                    None,
+                    Some(&reason),
+                )?;
+                return Ok(CallToolResult::error(vec![Content::text(reason)]));
+            }
         }
 
         // Write artifact to workspace.
@@ -1249,6 +1494,7 @@ mod tests {
                 name: "constraints".into(),
             },
             instructions: None,
+            workflow_mechanics: None,
         };
 
         let handler = RunaHandler::new(
@@ -1317,6 +1563,7 @@ mod tests {
                 name: "approved".into(),
             },
             instructions: None,
+            workflow_mechanics: None,
         };
 
         let handler = RunaHandler::new(protocol, None, store, tmp.path().join("workspace"), None);
@@ -1352,6 +1599,7 @@ mod tests {
                 name: "unused".into(),
             },
             instructions: None,
+            workflow_mechanics: None,
         };
 
         let handler = RunaHandler::new(protocol, None, store, tmp.path().join("workspace"), None);
@@ -1405,6 +1653,7 @@ mod tests {
                 name: "constraints".into(),
             },
             instructions: None,
+            workflow_mechanics: None,
         };
 
         let handler = RunaHandler::new(protocol, None, store, tmp.path().join("workspace"), None);
@@ -1456,6 +1705,7 @@ mod tests {
                 name: "constraints".into(),
             },
             instructions: None,
+            workflow_mechanics: None,
         };
 
         let handler = RunaHandler::new(
@@ -1507,6 +1757,7 @@ mod tests {
                 name: "unused".into(),
             },
             instructions: None,
+            workflow_mechanics: None,
         };
 
         let handler = RunaHandler::new(protocol, None, store, tmp.path().join("workspace"), None);
@@ -1538,6 +1789,7 @@ mod tests {
                 name: "unused".into(),
             },
             instructions: None,
+            workflow_mechanics: None,
         };
 
         let result = validate_output_types(&protocol, &store, Some("wu"));
@@ -1570,6 +1822,7 @@ mod tests {
                 name: "unused".into(),
             },
             instructions: None,
+            workflow_mechanics: None,
         };
 
         let result = validate_output_types(&protocol, &store, Some("wu"));
@@ -1606,6 +1859,7 @@ mod tests {
                 name: "unused".into(),
             },
             instructions: None,
+            workflow_mechanics: None,
         };
 
         assert!(validate_output_types(&protocol, &store, Some("wu")).is_ok());
@@ -1638,6 +1892,7 @@ mod tests {
                 name: "unused".into(),
             },
             instructions: None,
+            workflow_mechanics: None,
         };
 
         let result = validate_output_types(&protocol, &store, None);
@@ -1672,6 +1927,7 @@ mod tests {
                 name: "unused".into(),
             },
             instructions: None,
+            workflow_mechanics: None,
         };
 
         assert!(validate_output_types(&protocol, &store, Some("wu")).is_ok());
@@ -1703,6 +1959,7 @@ mod tests {
                 name: "unused".into(),
             },
             instructions: None,
+            workflow_mechanics: None,
         };
 
         assert!(validate_output_types(&protocol, &store, Some("wu")).is_ok());
@@ -1744,6 +2001,7 @@ mod tests {
                 name: "unused".into(),
             },
             instructions: None,
+            workflow_mechanics: None,
         };
 
         let handler = RunaHandler::new(
@@ -1773,6 +2031,7 @@ mod tests {
                 name: "unused".into(),
             },
             instructions: None,
+            workflow_mechanics: None,
         };
 
         let error = validate_protocol_scope(&protocol, None).unwrap_err();
@@ -1794,6 +2053,7 @@ mod tests {
                 name: "unused".into(),
             },
             instructions: None,
+            workflow_mechanics: None,
         };
 
         let error = validate_protocol_scope(&protocol, Some("wu-a")).unwrap_err();

@@ -543,6 +543,7 @@ mod tests {
                 name: "seed".into(),
             },
             instructions: None,
+            workflow_mechanics: None,
         }
     }
 
@@ -706,6 +707,7 @@ mod tests {
                 name: "request".into(),
             },
             instructions: None,
+            workflow_mechanics: None,
         }
     }
 

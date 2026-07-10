@@ -487,6 +487,7 @@ mod tests {
             scoped: false,
             trigger: default_trigger(requires, produces),
             instructions: None,
+            workflow_mechanics: None,
         }
     }
 
@@ -506,6 +507,7 @@ mod tests {
             scoped: false,
             trigger: default_trigger(requires, produces),
             instructions: None,
+            workflow_mechanics: None,
         }
     }
 
@@ -525,6 +527,7 @@ mod tests {
             scoped: false,
             trigger: default_trigger(requires, produces),
             instructions: None,
+            workflow_mechanics: None,
         }
     }
 
