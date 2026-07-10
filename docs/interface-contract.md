@@ -162,7 +162,7 @@ materialized work-unit id are indistinguishable downstream of acquisition.
 
 runa is an event-driven runtime. The CLI commands (init, scan, list, state, step, doctor) are windows into its state. The runtime itself is the monitoring loop.
 
-Given the declarations above, runa provides five runtime capabilities:
+Given the declarations above, runa provides six runtime capabilities:
 
 **Monitoring.** runa watches artifact state and evaluates trigger conditions on relevant state changes within the caller's evaluation scope. When a protocol's trigger condition becomes satisfied, runa activates the protocol.
 
@@ -173,6 +173,8 @@ Given the declarations above, runa provides five runtime capabilities:
 **Enforcement.** A protocol cannot execute if any `requires` artifact type lacks a valid instance. A protocol's execution is incomplete if its `produces` artifacts are missing or invalid, or if a required output choice has zero or multiple produced member types. These are hard constraints the runtime enforces regardless of what the methodology intends.
 
 **Context injection.** When a protocol is ready to execute, runa resolves which artifact instances the protocol needs — all valid `requires` instances and all available valid `accepts` instances within the active scope — and delivers them as the protocol's input context alongside the protocol's instruction content and expected outputs, including any required output choices. The protocol receives its inputs without querying the store directly.
+
+**Supersession.** A protocol output can conform to its schema and be current by input identity while an authorized disposition judges its content defective. runa provides one sanctioned, auditable operation for that judgment: a supersession disposition targets a recorded execution by exact protocol, output identity, and current revision, carries a required reason, preserves the rejected execution and revisions as lineage, and returns the producing protocol to readiness against its unchanged inputs while state derived from the rejected output is no longer current. Regeneration flows only through the ordinary execution paths, which resolve the pending supersession by recording the new execution. The methodology's artifacts and declarations are never mutated by the disposition.
 
 ## What runa Does Not Do
 
